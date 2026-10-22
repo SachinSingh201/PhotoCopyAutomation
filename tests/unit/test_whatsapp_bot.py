@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from backend.core.config import settings
 from backend.models.order import Order
 from backend.models.user import User
 from backend.services.orders.state_machine import OrderState
@@ -97,7 +98,7 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert mock_send.call_count == 1
         confirm_reply = mock_send.call_args[1]["text"]
         assert "Order Confirmed & Bill Receipt" in confirm_reply
-        assert "Payment Window: 5 MINUTES" in confirm_reply
+        assert f"Payment Window: {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} MINUTES" in confirm_reply
         assert order.pickup_token in confirm_reply
         # QR code image is now dispatched in this single confirmation step
         assert mock_img.call_count == 1
@@ -114,7 +115,29 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         await handle_inbound_whatsapp_event(db_session, verify_event)
         assert mock_send.call_count == 1
         verify_reply = mock_send.call_args[1]["text"]
-        assert "Payment Verification Update" in verify_reply or "Payment Confirmed!" in verify_reply
+        assert "Payment Verification" in verify_reply
+        assert "12-digit UTR" in verify_reply
+
+        # 5. Customer replies with bare 12-digit UTR: "429512345678"
+        saved_order_code = order.order_code
+        mock_send.reset_mock()
+        mock_img.reset_mock()
+        utr_event = {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Test Customer",
+            "text": "429512345678",
+        }
+        await handle_inbound_whatsapp_event(db_session, utr_event)
+        assert mock_send.call_count == 1
+        paid_reply = mock_send.call_args[1]["text"]
+        assert "Payment Confirmed!" in paid_reply
+        assert "429512345678" in paid_reply
+        assert order.pickup_token in paid_reply
+
+        # Verify order is queued
+        refreshed = (await db_session.execute(select(Order).where(Order.order_code == saved_order_code))).scalar_one()
+        assert refreshed.status in [OrderState.PAID.value, OrderState.QUEUED.value]
 
 
 @pytest.mark.asyncio
@@ -274,12 +297,12 @@ async def test_bot_multiple_files_in_draft_and_instant_reorder(db_session, valid
         limits_reply = mock_send.call_args[1]["text"]
         assert "System Limits & Quick Guide" in limits_reply
         assert "10 PDF files" in limits_reply
-        assert "5 minutes" in limits_reply
+        assert f"{settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes" in limits_reply
 
 
 @pytest.mark.asyncio
-async def test_bot_5_minute_unpaid_order_expiration(db_session, valid_pdf_6_pages):
-    """Verifies that unpaid orders exceeding the 5-minute timeout are expired and deleted."""
+async def test_bot_payment_timeout_unpaid_order_expiration(db_session, valid_pdf_6_pages):
+    """Verifies that unpaid orders exceeding the payment timeout are expired and deleted."""
     from datetime import datetime, timedelta, timezone
     from backend.services.orders.service import cleanup_expired_orders
 
@@ -313,8 +336,8 @@ async def test_bot_5_minute_unpaid_order_expiration(db_session, valid_pdf_6_page
         assert order is not None
         assert order.status == OrderState.PAYMENT_PENDING.value
 
-        # 3. Simulate passage of 6 minutes (exceeding 5-minute timeout)
-        past_time = datetime.now(timezone.utc) - timedelta(minutes=6)
+        # 3. Simulate passage exceeding payment timeout
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=settings.ORDER_PAYMENT_TIMEOUT_MINUTES + 1)
         order.expires_at = past_time
         await db_session.commit()
 
@@ -331,7 +354,7 @@ async def test_bot_5_minute_unpaid_order_expiration(db_session, valid_pdf_6_page
         assert mock_send.call_count == 1
         exp_text = mock_send.call_args[1]["text"]
         assert "Expired & Deleted" in exp_text
-        assert "5-minute payment window" in exp_text
+        assert f"{settings.ORDER_PAYMENT_TIMEOUT_MINUTES}-minute payment window" in exp_text
 
 
 @pytest.mark.asyncio

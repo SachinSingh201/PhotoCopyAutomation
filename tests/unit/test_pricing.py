@@ -1,5 +1,6 @@
 import json
 import pytest
+from backend.core.config import settings
 from backend.models.configuration import PrintConfiguration
 from backend.models.file import OrderFile
 from backend.models.order import Order
@@ -28,8 +29,13 @@ def test_validate_and_normalize_file_rules():
     assert breakdown["color_double"] == 0
 
     cost = calculate_file_price(breakdown)
-    # 4 * 2.0 (bw_single) + 16 * 3.0 (bw_double) = 8.0 + 48.0 = 56.0
-    assert cost == 56.0
+    expected_cost = (
+        breakdown["bw_single"] * settings.PRICE_BW_SINGLE
+        + breakdown["bw_double"] * settings.PRICE_BW_DOUBLE
+        + breakdown["color_single"] * settings.PRICE_COLOR_SINGLE
+        + breakdown["color_double"] * settings.PRICE_COLOR_DOUBLE
+    )
+    assert cost == expected_cost
 
 
 @pytest.mark.asyncio
@@ -91,13 +97,16 @@ async def test_order_pricing_snapshot_calculation(db_session):
 
     snapshot = await calculate_order_pricing_snapshot(db_session, order)
 
-    # Base charge: 2 files * 5.0 = 10.0
-    # Printing charge: 12.0 + 56.0 = 68.0
-    # Total = 10.0 + 68.0 = 78.0
+    expected_base = 2 * settings.PRICE_FILE_BASE_CHARGE
+    file1_cost = 6 * settings.PRICE_BW_SINGLE
+    file2_cost = 4 * settings.PRICE_BW_SINGLE + 16 * settings.PRICE_BW_DOUBLE
+    expected_printing = file1_cost + file2_cost
+    expected_total = expected_base + expected_printing
+
     assert snapshot.file_count == 2
-    assert snapshot.file_base_charge == 10.0
+    assert snapshot.file_base_charge == expected_base
     assert snapshot.total_pages == 26
-    assert snapshot.printing_charge == 68.0
-    assert snapshot.total_amount == 78.0
-    assert order.total_amount == 78.0
+    assert snapshot.printing_charge == expected_printing
+    assert snapshot.total_amount == expected_total
+    assert order.total_amount == expected_total
     assert order.total_pages == 26

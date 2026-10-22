@@ -24,10 +24,10 @@ An enterprise-grade, fully autonomous document printing and photocopy management
 - 📱 **Dual WhatsApp Transport Support**: Native integration with both **Meta WhatsApp Cloud API** and **OpenWA** (`whatsapp-web.js` self-hosted bridge) with automatic engine detection.
 - 📄 **Quiet Multi-File Document Bundling**: Upload up to **10 PDF files per order** (up to 50 MB each). The bot silently registers files and page counts without spamming bills or QR codes for each upload.
 - 🧾 **Single-Receipt Confirmation**: When all documents are sent, customer replies `DONE` or `CONFIRM`. The system outputs a **single consolidated receipt** with full file breakdown, total pricing, and a payment QR code.
-- ⏱️ **5-Minute Payment Timeout**: After confirmation, the customer has **5 minutes** to pay. If unpaid within 5 minutes, the order is automatically cancelled, private files are permanently deleted from disk, and the user is alerted.
+- ⏱️ **10-Minute Payment Timeout**: After confirmation, the customer has **10 minutes** to pay. If unpaid within 10 minutes, the order is automatically cancelled, private files are permanently deleted from disk, and the user is alerted.
 - ⚡ **Instant Concurrent Reordering**: Customers can place multiple orders simultaneously. As soon as an order is confirmed or paid, sending another PDF creates a fresh separate order immediately with its own unique pickup token.
 - ❌ **Instant Order Cancellation**: Customers can reply `CANCEL` anytime before physical printing to abort an order and discard draft files.
-- 💳 **Self-Hosted YouPI-PG & UPI Gateway**: Seamless integration with **YouPI-PG** (zero-fee self-hosted UPI gateway) alongside dynamic UPI QR codes and Razorpay, backed by server-side HMAC-SHA256 signature verification.
+- 💳 **Self-Hosted YouPI-PG & Instant UTR Verification**: Customers can reply `PAID <12-digit UTR>` (e.g. `PAID 429512345678`) or let YouPI-PG auto-confirm via bank SMS observation, transitioning orders directly to `PAID` → `QUEUED` with zero platform fees.
 - 🧠 **Smart NLP Interpretation**: Natural phrasing like *"print 3 copies of pages 1 to 10 in b&w both sides"* converted to deterministic order items.
 - 💰 **Deterministic Pricing Engine**: Flat base fees, page-range normalization, B&W / Color rates, and Simplex / Duplex configurations.
 - 🕒 **Store Scheduling & Smart ETAs**: Working hours enforcement, holiday exceptions, after-hours queuing, and dynamic queue wait-time estimation.
@@ -45,11 +45,12 @@ Customers interacting with the WhatsApp bot can use the following interactive co
 | :--- | :--- | :--- |
 | `[Send PDF]` | Uploads a PDF file. Adds to existing draft without spamming individual bills. | *Uploads document.pdf* |
 | `[Instructions]` | Natural language print options (duplex, copies, color, page ranges). | *"Double sided, 2 copies"* |
-| `DONE` / `CONFIRM` / `PAY` | Confirms all files are uploaded; generates single receipt + payment QR with 5-minute timer. | `DONE` or `CONFIRM` |
+| `DONE` / `CONFIRM` / `PAY` | Confirms all files are uploaded; generates single receipt + payment QR with 10-minute timer. | `DONE` or `CONFIRM` |
 | `CANCEL` / `ABORT` | Cancels draft or pending order and immediately purges uploaded files from disk. | `CANCEL` |
-| `PAID` / `VERIFY` | Re-verifies payment status and auto-dispatches to print queue if paid. | `PAID` |
+| `PAID <12-digit UTR>` | Instantly verifies UPI transaction reference / UTR, queues print job, and sends pickup timing. | `PAID 429512345678` |
+| `PAID` / `VERIFY` | Re-verifies payment status or prompts for 12-digit UTR if not auto-detected. | `PAID` |
 | `STATUS` / `MY ORDERS` | Lists all active print orders with pickup tokens, page counts, and statuses. | `STATUS` |
-| `LIMITS` / `HELP` | Shows system limits (10 files max, 50MB, 5-minute payment window). | `LIMITS` |
+| `LIMITS` / `HELP` | Shows system limits (10 files max, 50MB, 10-minute payment window). | `LIMITS` |
 
 ---
 
@@ -61,8 +62,8 @@ Customers interacting with the WhatsApp bot can use the following interactive co
 | **Max File Size** | `50 MB` | Configured via `MAX_FILE_SIZE_BYTES`. Corrupt or oversized files are rejected. |
 | **Concurrent Orders** | `Unlimited` | Customers can run multiple orders simultaneously with distinct pickup tokens. |
 | **Reorder Timing** | `Instantaneous` | Sending a PDF after confirming/paying automatically starts a new separate order. |
-| **Unpaid Order Hold** | `5 minutes` | Configured via `ORDER_PAYMENT_TIMEOUT_MINUTES`. Expired files are auto-purged from disk. |
-| **Payment Gateways** | `YouPI-PG / UPI / Razorpay` | Zero-fee self-hosted YouPI-PG, dynamic UPI deep links, or Razorpay checkout. |
+| **Unpaid Order Hold** | `10 minutes` | Configured via `ORDER_PAYMENT_TIMEOUT_MINUTES`. Expired files are auto-purged from disk. |
+| **Payment Gateways** | `YouPI-PG / UPI / Razorpay` | Zero-fee self-hosted YouPI-PG, instant 12-digit UTR verification, or Razorpay checkout. |
 
 ---
 

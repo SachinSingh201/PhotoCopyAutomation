@@ -54,9 +54,9 @@ class Settings(BaseSettings):
 
     # YouPI-PG Self-Hosted UPI Gateway Configuration
     YOUPI_GATEWAY_URL: str = "http://localhost:6100"
-    YOUPI_API_KEY: str = ""
     YOUPI_WEBHOOK_SECRET: str = "youpi_webhook_secret_change_me"
-    ORDER_PAYMENT_TIMEOUT_MINUTES: int = 5
+    ORDER_PAYMENT_TIMEOUT_MINUTES: int = 10
+    UTR_VERIFICATION_MODE: str = "assisted"  # "assisted" | "strict"
 
     # Pricing (in base currency unit, e.g. INR)
     PRICE_FILE_BASE_CHARGE: float = 5.0

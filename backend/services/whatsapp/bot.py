@@ -63,7 +63,7 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
 
     timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
 
-    # Build clear caption detailing payable amount, pickup timing, 5-minute timeout, and tokens
+    # Build clear caption detailing payable amount, pickup timing, timeout, and tokens
     caption_lines = [
         f"💳 *Scan QR to Pay: ₹{order.total_amount:.2f}*",
         f"• *Shop:* {settings.SHOP_NAME}",
@@ -72,7 +72,7 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         f"• *Pickup Token:* *{order.pickup_token}*",
         f"• *Total Payable:* *₹{order.total_amount:.2f}*",
         f"🕒 *Estimated Pickup Time:* ~{timing['eta_mins']} mins (Ready by ~{timing['ready_time_str']})",
-        f"⏱️ *Payment Window: 5 minutes* (Order will be deleted if unpaid)",
+        f"⏱️ *Payment Window: {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes* (Order will be cancelled if unpaid)",
     ]
     if youpi_info and youpi_info.get("payment_url"):
         caption_lines.extend([
@@ -88,7 +88,8 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         ])
     caption_lines.extend([
         "",
-        "⚡ *After paying:* Reply *PAID* or *VERIFY* (or wait for auto-confirmation via YouPI-PG)!",
+        "⚡ *After paying:* Reply *PAID <12-digit UTR>* (e.g. `PAID 429512345678`) to instantly queue your prints!",
+        "ℹ️ *Where to find UTR?* Look for 'UPI Ref No.', 'UTR', or 'Transaction ID' (12 digits) on your Google Pay / PhonePe / Paytm receipt.",
     ])
     caption = "\n".join(caption_lines)
 
@@ -134,13 +135,16 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
         f"• *Shop UPI ID:* `{settings.SHOP_UPI_ID}`\n"
         f"• *Pickup Token:* *{order.pickup_token}*\n"
-        f"⏱️ *Payment Window: 5 minutes* (Order will be deleted if unpaid)\n"
+        f"⏱️ *Payment Window: {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes* (Order will be cancelled if unpaid)\n"
     )
     if youpi_info and youpi_info.get("payment_url"):
         fallback_text += f"\n⚡ *Pay Online via YouPI:*\n{youpi_info['payment_url']}\n"
     elif rzp_url:
         fallback_text += f"\n🌐 *Pay Online via Razorpay:*\n{rzp_url}\n"
-    fallback_text += "\n👉 Show token at counter or reply *PAID* / *VERIFY* once completed!"
+    fallback_text += (
+        f"\n⚡ *After paying:* Reply *PAID <12-digit UTR>* (e.g. `PAID 429512345678`)\n"
+        f"👉 Or show Token *{order.pickup_token}* at the counter if paying cash."
+    )
     await whatsapp_service.send_text_message(to_phone=sender, text=fallback_text)
 
 
@@ -436,10 +440,11 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 f"• *Print Charge:* ₹{print_charge:.2f}\n"
                 f"• *Total Amount:* *₹{order.total_amount:.2f}*\n\n"
                 f"🕒 *Estimated Pickup Time:* ~{timing['eta_mins']} mins after payment (Ready by approx. {timing['ready_time_str']})\n"
-                f"⏳ *Payment Window: 5 MINUTES* (Expires at {expiry_str})\n"
-                f"⚠️ *Important:* If payment is not completed within 5 minutes, this order and its uploaded files will be permanently deleted!\n\n"
+                f"⏳ *Payment Window: {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} MINUTES* (Expires at {expiry_str})\n"
+                f"⚠️ *Important:* If payment is not completed within {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes, this order and its uploaded files will be permanently deleted!\n\n"
                 f"💳 Please scan the QR code below or pay via UPI.\n"
-                f"⚡ After paying, reply *PAID* or *PAID <UTR>* (e.g. `PAID 429512345678`)!\n"
+                f"⚡ After paying, reply *PAID <12-digit UTR>* (e.g. `PAID 429512345678`) to instantly start printing!\n"
+                f"ℹ️ (Find the 12-digit UPI Ref/UTR on your Google Pay, PhonePe, or Paytm receipt)\n"
                 f"❌ Reply *CANCEL* to cancel this order anytime."
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
@@ -448,16 +453,32 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await send_payment_qr(sender, order, session=session)
             return
 
-        # Subcase C3: Payment Reverification command (supports optional 10-14 digit UTR)
-        elif any(cmd.startswith(prefix) for prefix in ["PAID", "VERIFY", "REVERIFY", "UTR", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE"]):
+        # Subcase C3: Payment Reverification command (supports optional 10-16 digit UTR or bare UTR)
+        elif any(cmd.startswith(prefix) for prefix in ["PAID", "VERIFY", "REVERIFY", "UTR", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE"]) or (
+            order and order.status in [OrderState.PAYMENT_PENDING.value, OrderState.PRICE_CALCULATED.value, OrderState.EXPIRED.value] and re.match(r"^\s*\d{10,16}\s*$", user_text.strip())
+        ):
+            if not order:
+                # Check for most recent order in PAYMENT_PENDING or EXPIRED state for this user
+                query = (
+                    select(Order)
+                    .where(Order.user_id == user.id, Order.status.in_([OrderState.PAYMENT_PENDING.value, OrderState.EXPIRED.value]))
+                    .options(
+                        selectinload(Order.files).selectinload(OrderFile.configuration),
+                        selectinload(Order.user),
+                    )
+                    .order_by(desc(Order.created_at))
+                )
+                res = await session.execute(query)
+                order = res.scalars().first()
+
             if not order:
                 await whatsapp_service.send_text_message(
                     to_phone=sender,
-                    text="ℹ️ No active order found to verify payment for. Send a PDF document to start!",
+                    text="ℹ️ No active order found to verify payment for. Send a PDF document to start a new order!",
                 )
                 return
 
-            utr_match = re.search(r"\b(\d{10,14})\b", user_text)
+            utr_match = re.search(r"\b(\d{10,16})\b", user_text)
             extracted_utr = utr_match.group(1) if utr_match else None
 
             result = await reverify_order_payment(session, order, utr=extracted_utr)
@@ -474,16 +495,16 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"✨ *Need more prints?* You can send another PDF right now to place a new order instantaneously!"
                 )
             else:
-                reply = (
+                reply = result.get("message") or (
                     f"⏳ *Payment Verification Update* (Order #{order.order_code})\n\n"
                     f"• *Status:* {order.status}\n"
                     f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
                     f"• *Pickup Token:* *{order.pickup_token}*\n\n"
-                    f"{result.get('message', 'Payment not confirmed yet.')}\n\n"
-                    f"👉 If you already paid via UPI, reply with your 12-digit UTR/Ref number:\n"
+                    f"Payment not confirmed yet.\n\n"
+                    f"👉 If you paid via UPI, reply with your 12-digit UTR/Ref number:\n"
                     f"*PAID <12-digit UTR>* (e.g. `PAID 429512345678`)\n"
-                    f"👉 If paying in cash at the counter, show Token *{order.pickup_token}* to the shop owner.\n"
-                    f"👉 Reply *CANCEL* if you wish to cancel this order."
+                    f"👉 If paying in cash, show Token *{order.pickup_token}* at the counter.\n"
+                    f"👉 Reply *CANCEL* to cancel this order anytime."
                 )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
             return
@@ -524,7 +545,7 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 f"• *Files per Order:* Up to {settings.MAX_FILES_PER_ORDER} PDF files in a single order\n"
                 f"• *File Size Limit:* Up to {settings.MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB per file\n"
                 f"• *Single Receipt Flow:* Upload all your files quietly, then reply *DONE* to receive your final receipt and payment QR in a single step\n"
-                f"• *Payment Window:* 5 minutes (unpaid orders and uploaded files are automatically deleted after 5 minutes)\n"
+                f"• *Payment Window:* {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes (unpaid orders and uploaded files are automatically deleted after {settings.ORDER_PAYMENT_TIMEOUT_MINUTES} minutes)\n"
                 f"• *Multiple Orders:* Unlimited! You can run multiple orders simultaneously\n"
                 f"• *Instant Reordering:* Send a new PDF document immediately after confirming or paying for an order\n"
                 f"• *Cancellation:* Reply *CANCEL* anytime before printing\n\n"

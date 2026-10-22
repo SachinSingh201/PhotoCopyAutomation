@@ -86,13 +86,13 @@ async def test_complete_vertical_slice_order_lifecycle(client, valid_pdf_6_pages
     confirm_res = await client.post(f"/orders/{order_id}/confirm")
     assert confirm_res.status_code == 200
     price_snap = confirm_res.json()
-    # 2 files * 5.0 base + 26 * 2.0 (BW single) = 10.0 + 52.0 = 62.0
-    assert price_snap["total_amount"] == 62.0
+    expected_amount = 2 * settings.PRICE_FILE_BASE_CHARGE + 26 * settings.PRICE_BW_SINGLE
+    assert price_snap["total_amount"] == expected_amount
 
     # 5. Initiate payment
     pay_create = await client.post("/payments/create", json={"order_id": order_id})
     assert pay_create.status_code == 200
-    assert pay_create.json()["amount"] == 62.0
+    assert pay_create.json()["amount"] == expected_amount
 
     # Verify payment (mock server-side proof)
     pay_verify = await client.post(

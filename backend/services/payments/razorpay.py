@@ -173,6 +173,41 @@ async def check_youpi_api_status(order_code: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def check_youpi_observation_for_utr(utr: str, expected_amount: float) -> Dict[str, Any]:
+    """
+    Looks up a 12-digit UTR in YouPI-PG's SQLite observation database
+    to check whether ICICI/bank SMS was captured for this reference.
+    """
+    import sqlite3
+    from pathlib import Path
+    db_path = Path("YouPI-PG/data/youpi_pg.sqlite")
+    if not db_path.exists():
+        return {"found": False}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, amount_paise, attribution_status FROM payment_observations WHERE bank_reference_number = ?",
+            (utr,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            obs_id, amount_paise, attr_status = row
+            actual_amount = float(amount_paise) / 100.0
+            amount_matches = abs(actual_amount - expected_amount) < 0.1
+            return {
+                "found": True,
+                "observation_id": obs_id,
+                "actual_amount": actual_amount,
+                "amount_matches": amount_matches,
+                "attribution_status": attr_status,
+            }
+    except Exception as e:
+        logger.warning(f"Error checking YouPI observation for UTR {utr}: {e}")
+    return {"found": False}
+
+
 async def reverify_order_payment(session: AsyncSession, order: Order, utr: Optional[str] = None) -> Dict[str, Any]:
     """
     Checks if an order has been paid online or verified via UTR or YouPI-PG.
@@ -202,38 +237,98 @@ async def reverify_order_payment(session: AsyncSession, order: Order, utr: Optio
     # 1. Customer-provided UTR (e.g. from WhatsApp "PAID 429512345678" or bank reference)
     if utr:
         clean_utr = re.sub(r"[^\d]", "", utr)
-        if len(clean_utr) >= 10:
-            now = datetime.now(timezone.utc)
-            payment = Payment(
-                order_id=order.id,
-                provider="YOUPI_UPI",
-                provider_payment_id=clean_utr,
-                provider_order_id=order.order_code,
-                amount=order.total_amount,
-                currency=order.currency,
-                status="VERIFIED",
-                verified_at=now,
-                raw_event_reference=json.dumps({"method": "CUSTOMER_UTR", "utr": clean_utr}),
-            )
-            session.add(payment)
-            order.paid_at = now
-            if order.status != OrderState.PAID.value:
-                await transition_order(
-                    session=session,
-                    order=order,
-                    target_state=OrderState.PAID,
-                    actor_type="CUSTOMER",
-                    metadata={"utr": clean_utr, "method": "CUSTOMER_UTR"},
-                )
-            await enqueue_verified_order(session=session, order=order)
-            await session.commit()
+        if len(clean_utr) < 10 or len(clean_utr) > 16:
             return {
-                "verified": True,
+                "verified": False,
                 "status": order.status,
-                "utr": clean_utr,
-                "message": f"Payment of ₹{order.total_amount:.2f} successfully verified with UTR {clean_utr}! Your print job has been queued.",
+                "message": (
+                    f"⚠️ *Invalid UTR Format:* '{utr}'.\n"
+                    f"UPI Reference Numbers (UTR) must be 12 digits (e.g. `PAID 429512345678`).\n\n"
+                    f"👉 Please check your payment app receipt and reply again."
+                ),
                 "pickup_token": order.pickup_token,
             }
+
+        # Check duplicate/replay across orders
+        dup_query = select(Payment).where(
+            Payment.provider_payment_id == clean_utr,
+            Payment.order_id != order.id,
+            Payment.status == "VERIFIED",
+        )
+        dup_res = await session.execute(dup_query)
+        if dup_res.scalar_one_or_none():
+            return {
+                "verified": False,
+                "status": order.status,
+                "message": (
+                    f"⚠️ *UTR Already Used:* Transaction reference `{clean_utr}` has already been redeemed for another order.\n\n"
+                    f"👉 Please provide the fresh UTR from your current payment of ₹{order.total_amount:.2f}."
+                ),
+                "pickup_token": order.pickup_token,
+            }
+
+        # Check against YouPI-PG bank observations (SMS / Push alerts)
+        obs_check = check_youpi_observation_for_utr(clean_utr, order.total_amount)
+        if obs_check.get("found"):
+            if not obs_check.get("amount_matches"):
+                actual_amt = obs_check.get("actual_amount", 0.0)
+                return {
+                    "verified": False,
+                    "status": order.status,
+                    "message": (
+                        f"⚠️ *Payment Amount Mismatch!*\n"
+                        f"• Bank SMS record for UTR `{clean_utr}`: ₹{actual_amt:.2f}\n"
+                        f"• Order Total Required: ₹{order.total_amount:.2f}\n\n"
+                        f"👉 Please pay the exact amount or speak to the shop owner at the counter."
+                    ),
+                    "pickup_token": order.pickup_token,
+                }
+            source_tag = "YOUPI_BANK_SMS_VERIFIED"
+        else:
+            if getattr(settings, "UTR_VERIFICATION_MODE", "assisted") == "strict":
+                return {
+                    "verified": False,
+                    "status": order.status,
+                    "message": (
+                        f"⏳ *Verifying Bank SMS for UTR `{clean_utr}`...*\n\n"
+                        f"We haven't received the bank credit alert from your bank yet (usually takes 15-30 seconds).\n"
+                        f"👉 Please wait a few moments and reply *PAID* again, or show Token *{order.pickup_token}* at the counter."
+                    ),
+                    "pickup_token": order.pickup_token,
+                }
+            source_tag = "CUSTOMER_UTR"
+
+        now = datetime.now(timezone.utc)
+        payment = Payment(
+            order_id=order.id,
+            provider="YOUPI_UPI",
+            provider_payment_id=clean_utr,
+            provider_order_id=order.order_code,
+            amount=order.total_amount,
+            currency=order.currency,
+            status="VERIFIED",
+            verified_at=now,
+            raw_event_reference=json.dumps({"method": source_tag, "utr": clean_utr}),
+        )
+        session.add(payment)
+        order.paid_at = now
+        if order.status != OrderState.PAID.value:
+            await transition_order(
+                session=session,
+                order=order,
+                target_state=OrderState.PAID,
+                actor_type="CUSTOMER",
+                metadata={"utr": clean_utr, "method": source_tag},
+            )
+        await enqueue_verified_order(session=session, order=order)
+        await session.commit()
+        return {
+            "verified": True,
+            "status": order.status,
+            "utr": clean_utr,
+            "message": f"Payment of ₹{order.total_amount:.2f} successfully verified with UTR {clean_utr}! Your print job has been queued.",
+            "pickup_token": order.pickup_token,
+        }
 
     # 2. Check YouPI-PG database or API
     youpi_check = check_youpi_local_db_for_payment(order.order_code, order.total_amount)
@@ -298,11 +393,19 @@ async def reverify_order_payment(session: AsyncSession, order: Order, utr: Optio
         "verified": False,
         "status": order.status,
         "message": (
-            f"Payment not detected yet for Order #{order.order_code} (₹{order.total_amount:.2f}).\n\n"
-            f"👉 If you already paid via UPI (Google Pay, PhonePe, Paytm, etc.), reply with your 12-digit UTR/Ref number:\n"
-            f"*PAID <12-digit UTR>* (e.g. `PAID 429512345678`)\n"
-            f"👉 If paying in cash, show Token *{order.pickup_token}* to the shop owner at the counter.\n"
-            f"👉 Or reply *CANCEL* to cancel this order."
+            f"⏳ *Payment Verification (Order #{order.order_code})*\n\n"
+            f"• *Status:* PAYMENT PENDING\n"
+            f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
+            f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+            f"👉 *If you paid via UPI (Google Pay / PhonePe / Paytm):*\n"
+            f"Please reply with your 12-digit UTR / UPI Ref number:\n"
+            f"*PAID <12-digit UTR>* (e.g. `PAID 429512345678`)\n\n"
+            f"📍 *Where to find it on your receipt:*\n"
+            f"• *Google Pay:* Tap transaction ➔ 'UPI transaction ID' (12 digits)\n"
+            f"• *PhonePe:* Tap transaction ➔ 'UTR' (12 digits)\n"
+            f"• *Paytm:* Tap transaction ➔ 'UPI Ref No.' (12 digits)\n\n"
+            f"👉 Paying in cash? Show Token *{order.pickup_token}* at the counter.\n"
+            f"👉 Reply *CANCEL* to cancel this order anytime."
         ),
         "pickup_token": order.pickup_token,
     }
