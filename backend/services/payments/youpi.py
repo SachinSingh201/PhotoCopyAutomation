@@ -39,16 +39,25 @@ async def create_youpi_order(order: Order) -> Dict[str, Any]:
     if settings.YOUPI_API_KEY:
         headers["X-Merchant-Key"] = settings.YOUPI_API_KEY
 
+    customer_name = "Customer"
+    customer_phone = ""
+    try:
+        if hasattr(order, "user") and order.user is not None:
+            customer_name = getattr(order.user, "display_name", None) or "Customer"
+            raw_phone = getattr(order.user, "phone_number", None) or ""
+            customer_phone = raw_phone.replace("+", "").strip()
+    except Exception:
+        pass
+
     payload = {
         "orderId": order.order_code,
         "amount": f"{order.total_amount:.2f}",
         "currency": "INR",
         "customer": {
-            "name": order.user.display_name if order.user and order.user.display_name else "Customer",
-            "phoneNumber": (order.user.phone_number or "").replace("+", "").strip() if order.user else "",
+            "name": customer_name,
+            "phoneNumber": customer_phone,
         },
         "description": f"Print Order #{order.order_code} (Pickup Token: {order.pickup_token})",
-        "autoActivate": True,
     }
 
     try:
