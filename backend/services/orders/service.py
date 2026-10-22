@@ -119,9 +119,58 @@ async def get_order_by_id(session: AsyncSession, order_id: str) -> Order:
     return order
 
 
+async def expire_single_order(session: AsyncSession, order: Order, reason: str = "5-minute payment window expired without payment") -> bool:
+    """
+    Immediately expires an unpaid order, deletes its PDF files from private storage,
+    marks files as DELETED, and notifies the customer on WhatsApp.
+    """
+    if order.status not in [OrderState.PAYMENT_PENDING.value, OrderState.AWAITING_CONFIRMATION.value]:
+        return False
+
+    now = datetime.now(timezone.utc)
+    logger.info(f"Expiring unpaid order #{order.order_code} (Reason: {reason})")
+    await transition_order(
+        session=session,
+        order=order,
+        target_state=OrderState.EXPIRED,
+        actor_type="SYSTEM",
+        metadata={"reason": reason},
+    )
+
+    # Physically delete uploaded PDF files from private storage
+    order_dir = settings.storage_path / "orders" / order.id
+    if order_dir.exists():
+        shutil.rmtree(order_dir, ignore_errors=True)
+
+    for f in order.files:
+        f.status = "DELETED"
+        f.deleted_at = now
+
+    await session.commit()
+
+    # Notify customer via WhatsApp
+    if order.user and order.user.phone_number:
+        exp_msg = (
+            f"⏱️ *Order #{order.order_code} Expired & Deleted*\n\n"
+            f"Your 5-minute payment window for Token *{order.pickup_token}* has expired without payment.\n"
+            f"• *Status:* EXPIRED\n"
+            f"• *Uploaded Files:* Safely deleted from disk\n\n"
+            f"✨ You can send a new PDF document anytime to place a fresh order!"
+        )
+        try:
+            await whatsapp_service.send_text_message(
+                to_phone=order.user.phone_number,
+                text=exp_msg,
+            )
+        except Exception as notify_err:
+            logger.warning(f"Failed to send expiration WhatsApp notice: {notify_err}")
+
+    return True
+
+
 async def cleanup_expired_orders(session: AsyncSession) -> List[str]:
     """
-    Finds orders in PAYMENT_PENDING (or draft) that exceeded their expiration time (5-minute payment window).
+    Finds orders in PAYMENT_PENDING that exceeded their expiration time (5-minute payment window).
     Transitions them to EXPIRED, physically deletes stored PDF files from disk,
     marks order files as DELETED, and notifies the customer on WhatsApp.
     """
@@ -144,46 +193,12 @@ async def cleanup_expired_orders(session: AsyncSession) -> List[str]:
     cleaned_codes: List[str] = []
     for order in expired_orders:
         try:
-            logger.info(f"Expiring unpaid order #{order.order_code} (5-min payment timeout exceeded)")
-            await transition_order(
-                session=session,
-                order=order,
-                target_state=OrderState.EXPIRED,
-                actor_type="SYSTEM",
-                metadata={"reason": "5-minute payment window expired without payment"},
-            )
-
-            # Physically delete uploaded PDF files from private storage
-            order_dir = settings.storage_path / "orders" / order.id
-            if order_dir.exists():
-                shutil.rmtree(order_dir, ignore_errors=True)
-
-            for f in order.files:
-                f.status = "DELETED"
-                f.deleted_at = now
-
-            await session.commit()
-            cleaned_codes.append(order.order_code)
-
-            # Notify customer via WhatsApp
-            if order.user and order.user.phone_number:
-                exp_msg = (
-                    f"⏱️ *Order #{order.order_code} Expired & Deleted*\n\n"
-                    f"Your 5-minute payment window for Token *{order.pickup_token}* has expired without payment.\n"
-                    f"• *Status:* EXPIRED\n"
-                    f"• *Uploaded Files:* Safely deleted from disk\n\n"
-                    f"✨ You can send a new PDF document anytime to place a fresh order!"
-                )
-                try:
-                    await whatsapp_service.send_text_message(
-                        to_phone=order.user.phone_number,
-                        text=exp_msg,
-                    )
-                except Exception as notify_err:
-                    logger.warning(f"Failed to send expiration WhatsApp notice: {notify_err}")
-
+            success = await expire_single_order(session, order, reason="5-minute payment window expired without payment")
+            if success:
+                cleaned_codes.append(order.order_code)
         except Exception as err:
             logger.error(f"Error during expiration cleanup for Order #{order.order_code}: {err}")
             await session.rollback()
 
     return cleaned_codes
+

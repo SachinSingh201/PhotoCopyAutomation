@@ -385,3 +385,65 @@ async def test_youpi_webhook_payment_verification(db_session, valid_pdf_6_pages)
         assert "Payment Verified via UPI!" in paid_text
         assert order.pickup_token in paid_text
         assert "UTR998877665544" in paid_text
+
+
+@pytest.mark.asyncio
+async def test_youpi_webhook_expired_event(db_session, valid_pdf_6_pages):
+    """Verifies that an EXPIRED webhook event from YouPI-PG immediately marks order expired and deletes files."""
+    from unittest.mock import AsyncMock, patch
+    from backend.core.config import settings
+    from backend.services.payments.youpi import process_youpi_payment_success
+
+    phone = "919900112233"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # Upload and confirm order
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "Timeout Customer",
+            "document": {"id": "doc_to_1", "filename": "timeout.pdf", "mime_type": "application/pdf"},
+        })
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Timeout Customer",
+            "text": "DONE",
+        })
+
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        order = await get_active_customer_order(db_session, user)
+        assert order.status == OrderState.PAYMENT_PENDING.value
+
+        # Create dummy file on disk in order directory
+        order_dir = settings.storage_path / "orders" / order.id
+        order_dir.mkdir(parents=True, exist_ok=True)
+        dummy_file = order_dir / "timeout.pdf"
+        dummy_file.write_bytes(b"%PDF dummy content")
+        assert dummy_file.exists()
+
+        # Simulate YouPI-PG Webhook with event: EXPIRED
+        mock_send.reset_mock()
+        webhook_payload = {
+            "event": "EXPIRED",
+            "orderId": order.order_code,
+            "paymentId": "yp_session_expired_1",
+            "status": "EXPIRED",
+        }
+        success, message, updated_order = await process_youpi_payment_success(db_session, webhook_payload)
+        assert success is True
+        assert updated_order.status == OrderState.EXPIRED.value
+        assert not dummy_file.exists()
+
+        # Verify WhatsApp cancellation notice sent to customer
+        assert mock_send.call_count == 1
+        msg = mock_send.call_args[1]["text"]
+        assert "Expired & Deleted" in msg
+        assert order.pickup_token in msg
+

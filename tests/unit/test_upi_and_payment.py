@@ -110,8 +110,12 @@ async def test_admin_payment_endpoints():
 
 @pytest.mark.asyncio
 async def test_youpi_webhook_http_endpoint(client, db_session, valid_pdf_6_pages):
+    import hashlib
+    import hmac
+    import json
     from unittest.mock import AsyncMock, patch
     from sqlalchemy import select
+    from backend.core.config import settings
     from backend.models.user import User
     from backend.services.whatsapp.bot import handle_inbound_whatsapp_event, get_active_customer_order
 
@@ -147,7 +151,18 @@ async def test_youpi_webhook_http_endpoint(client, db_session, valid_pdf_6_pages
             "utr": "UTR_HTTP_TEST_123",
             "status": "SUCCESS",
         }
-        res = await client.post("/api/v1/payments/youpi/webhook", json=webhook_body)
+        body_bytes = json.dumps(webhook_body).encode("utf-8")
+        sig = hmac.new(
+            (settings.YOUPI_WEBHOOK_SECRET or "").encode("utf-8"),
+            body_bytes,
+            hashlib.sha256,
+        ).hexdigest()
+
+        res = await client.post(
+            "/api/v1/payments/youpi/webhook",
+            content=body_bytes,
+            headers={"Content-Type": "application/json", "x-youpi-signature": sig},
+        )
         assert res.status_code == 200, f"Expected 200 but got {res.status_code}: {res.text}"
         data = res.json()
         assert data["status"] == "success"

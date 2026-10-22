@@ -33,16 +33,22 @@ async def create_youpi_order(order: Order) -> Dict[str, Any]:
     )
     qr_url = generate_qr_code_url(upi_uri, size=350)
 
-    youpi_url = f"{settings.YOUPI_GATEWAY_URL.rstrip('/')}/api/create-order"
+    # Primary YouPI-PG OpenAPI endpoint: /api/v1/payments
+    youpi_url = f"{settings.YOUPI_GATEWAY_URL.rstrip('/')}/api/v1/payments"
     headers = {"Content-Type": "application/json"}
     if settings.YOUPI_API_KEY:
-        headers["Authorization"] = f"Bearer {settings.YOUPI_API_KEY}"
+        headers["X-Merchant-Key"] = settings.YOUPI_API_KEY
 
     payload = {
-        "order_id": order.order_code,
+        "orderId": order.order_code,
         "amount": f"{order.total_amount:.2f}",
-        "customer_phone": order.user.phone_number if order.user else "",
-        "note": f"Order #{order.order_code} Token {order.pickup_token}",
+        "currency": "INR",
+        "customer": {
+            "name": order.user.display_name if order.user and order.user.display_name else "Customer",
+            "phoneNumber": (order.user.phone_number or "").replace("+", "").strip() if order.user else "",
+        },
+        "description": f"Print Order #{order.order_code} (Pickup Token: {order.pickup_token})",
+        "autoActivate": True,
     }
 
     try:
@@ -51,13 +57,16 @@ async def create_youpi_order(order: Order) -> Dict[str, Any]:
             if resp.status_code in [200, 201]:
                 data = resp.json()
                 logger.info(f"YouPI-PG order created successfully for #{order.order_code}")
+                checkout_url = data.get("checkoutUrl") or data.get("checkout_url") or data.get("payment_url")
                 return {
                     "status": "success",
                     "mode": "youpi",
-                    "upi_uri": data.get("upi_uri") or upi_uri,
-                    "payment_url": data.get("payment_url") or data.get("checkout_url"),
+                    "payment_id": data.get("paymentId") or data.get("id"),
+                    "upi_uri": data.get("upi_uri") or data.get("upiUri") or upi_uri,
+                    "payment_url": checkout_url,
                     "qr_data": data.get("qr_data") or data.get("qr_code") or upi_uri,
                     "qr_code_url": qr_url,
+                    "expires_at": data.get("expiresAt"),
                 }
             else:
                 logger.warning(f"YouPI-PG returned status {resp.status_code}: {resp.text}. Using fallback UPI.")
@@ -102,8 +111,15 @@ async def process_youpi_payment_success(
     Processes an incoming payment confirmation webhook from YouPI-PG.
     Validates amount, transitions order to PAID, enqueues the print job,
     and alerts the customer on WhatsApp with their pickup token.
+    If event is EXPIRED or CANCELLED, expires the order and deletes files immediately.
     """
-    order_id = event_data.get("order_id") or event_data.get("order_code") or event_data.get("id")
+    order_id = (
+        event_data.get("orderId")
+        or event_data.get("order_id")
+        or event_data.get("order_code")
+        or event_data.get("id")
+    )
+    event_type = (event_data.get("event") or "SUCCESS").upper()
     utr = event_data.get("utr") or event_data.get("transaction_id") or event_data.get("ref_no") or "YOUPI-DIRECT"
     amount_raw = event_data.get("amount")
 
@@ -125,6 +141,12 @@ async def process_youpi_payment_success(
 
     if not order:
         return False, f"Order {order_id} not found", None
+
+    # Handle EXPIRED / CANCELLED webhook events from YouPI-PG timing engine
+    if event_type in ["EXPIRED", "CANCELLED", "FAILED"]:
+        from backend.services.orders.service import expire_single_order
+        await expire_single_order(session, order, reason=f"YouPI-PG payment {event_type.lower()}")
+        return True, f"Order #{order.order_code} expired/cancelled via YouPI webhook", order
 
     # Idempotency check: if order already paid or beyond, return success
     if order.status in [
