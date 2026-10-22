@@ -9,7 +9,14 @@ const DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satu
 // Auth & API Request Helper
 function getAdminToken() {
     const input = document.getElementById('admin-token-input');
-    return input ? input.value.trim() : 'admin_secret_token_change_me';
+    const val = input ? input.value.trim() : '';
+    if (val) {
+        localStorage.setItem('printshop_admin_secret', val);
+        return val;
+    }
+    const stored = localStorage.getItem('printshop_admin_secret');
+    if (stored) return stored;
+    return '6396';
 }
 
 async function apiRequest(endpoint, options = {}) {
@@ -24,11 +31,16 @@ async function apiRequest(endpoint, options = {}) {
         const res = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
         if (!res.ok) {
             const errData = await res.json().catch(() => ({}));
+            if (res.status === 403) {
+                showToast("Admin Key invalid (403 Forbidden). Check top-right Admin Key input (default: 6396)", "error");
+            }
             throw new Error(errData.detail || errData.message || `HTTP ${res.status}`);
         }
         return await res.json();
     } catch (err) {
-        showToast(err.message, 'error');
+        if (options.method && options.method !== 'GET') {
+            showToast(err.message, 'error');
+        }
         throw err;
     }
 }
@@ -1151,8 +1163,12 @@ async function uploadShopQRImage() {
     formData.append("file", file);
 
     try {
+        const token = getAdminToken();
         const res = await fetch('/api/v1/admin/payments/qr-upload', {
             method: 'POST',
+            headers: {
+                'X-Admin-Secret': token
+            },
             body: formData
         });
         const data = await res.json();
@@ -1161,7 +1177,7 @@ async function uploadShopQRImage() {
             fileInput.value = '';
             fetchPaymentSettings();
         } else {
-            showToast(data.detail || "Upload failed", "error");
+            showToast(data.detail || "Upload failed: Unauthorized admin key or file error", "error");
         }
     } catch (err) {
         showToast("Upload failed: " + err.message, "error");
@@ -1171,8 +1187,12 @@ async function uploadShopQRImage() {
 async function deleteShopQRImage() {
     if (!confirm("Remove the custom counter QR image and revert to dynamic QR generation?")) return;
     try {
+        const token = getAdminToken();
         const res = await fetch('/api/v1/admin/payments/qr-image', {
-            method: 'DELETE'
+            method: 'DELETE',
+            headers: {
+                'X-Admin-Secret': token
+            }
         });
         const data = await res.json();
         if (res.ok) {
@@ -1267,6 +1287,25 @@ document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     initGlobalSearch();
     initNotifications();
+
+    // Admin Secret Key synchronization with localStorage
+    const tokenInput = document.getElementById('admin-token-input');
+    if (tokenInput) {
+        const stored = localStorage.getItem('printshop_admin_secret');
+        if (stored) {
+            tokenInput.value = stored;
+        } else {
+            tokenInput.value = '6396';
+            localStorage.setItem('printshop_admin_secret', '6396');
+        }
+        tokenInput.addEventListener('input', () => {
+            localStorage.setItem('printshop_admin_secret', tokenInput.value.trim());
+        });
+        tokenInput.addEventListener('change', () => {
+            localStorage.setItem('printshop_admin_secret', tokenInput.value.trim());
+            refreshActiveTabData();
+        });
+    }
 
     // Top Controls
     document.getElementById('btn-emergency-stop')?.addEventListener('click', triggerEmergencyStop);

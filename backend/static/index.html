@@ -63,9 +63,12 @@
             </button>
 
             <!-- Admin Profile / Auth Input -->
-            <div class="admin-profile-box">
-                <input type="password" id="admin-token-input" placeholder="Admin Secret" value="admin_secret_token_change_me" title="Admin Secret Token">
-                <div class="admin-avatar" title="Shop Owner">SO</div>
+            <div class="admin-profile-box" style="display:flex; align-items:center; gap:8px;">
+                <div style="display:flex; align-items:center; background:rgba(0,0,0,0.35); border:1px solid var(--border-color); border-radius:var(--radius-sm); padding:4px 8px;">
+                    <span style="font-size:0.75rem; color:var(--text-muted); margin-right:6px;" title="Secret Key configured in .env">🔑 Key:</span>
+                    <input type="password" id="admin-token-input" placeholder="Admin Secret" value="6396" style="background:transparent; border:none; outline:none; color:#fff; width:65px; font-size:0.8rem; font-family:monospace;" title="Admin Secret Key (ADMIN_SECRET=6396 in .env)">
+                </div>
+                <div class="admin-avatar" title="Shop Owner: sachin singh">SO</div>
             </div>
         </div>
     </header>
