@@ -44,6 +44,8 @@ class CurrentPrintJobDetail(BaseModel):
     total_pages: int = 0
     color_mode: str = "bw"
     default_sides: str = "single"
+    printer_id: Optional[str] = None
+    printer_name: Optional[str] = None
     started_at: Optional[datetime] = None
     estimated_duration_seconds: int = 0
     estimated_completion_at: Optional[datetime] = None
@@ -76,9 +78,26 @@ class PrinterItem(BaseModel):
     last_test_page_at: Optional[datetime] = None
 
 
+class PrinterCreateRequest(BaseModel):
+    name: str
+    model: Optional[str] = None
+    connection_type: str = "USB"  # USB, Network
+    ip_address: Optional[str] = None
+    status: str = "connected"
+    is_default: bool = False
+    supports_color: bool = True
+    supports_duplex: bool = True
+    paper_tray_status: Optional[str] = "Ready"
+    toner_level: Optional[int] = 100
+
+
 class PrinterPatchRequest(BaseModel):
     is_default: Optional[bool] = None
     status: Optional[str] = None
+    supports_color: Optional[bool] = None
+    supports_duplex: Optional[bool] = None
+    paper_tray_status: Optional[str] = None
+    toner_level: Optional[int] = None
 
 
 class AdminDashboardStats(BaseModel):
@@ -117,6 +136,8 @@ class AdminQueueItem(BaseModel):
     estimated_duration_seconds: int
     eta_seconds: int = 0
     print_mode: str = "AUTO"
+    printer_id: Optional[str] = None
+    printer_name: Optional[str] = None
     enqueued_at: datetime
 
 

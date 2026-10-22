@@ -283,8 +283,11 @@ async function fetchDashboardData() {
                             </div>
                             <span class="status-tag tag-printing">SPOOLING</span>
                         </div>
-                        <div style="font-size:0.88rem; margin-bottom:8px;">
+                        <div style="font-size:0.88rem; margin-bottom:4px;">
                             File: <b>${escapeHtml(curJob.primary_filename)}</b> (${curJob.total_pages} pages, ${curJob.color_mode.toUpperCase()}, ${curJob.default_sides.toUpperCase()})
+                        </div>
+                        <div style="font-size:0.82rem; margin-bottom:8px; color:var(--accent-blue);">
+                            Printer: <b>${escapeHtml(curJob.printer_name || 'Auto Assigned')}</b>
                         </div>
                         <div class="text-muted" style="font-size:0.82rem;">
                             Started: ${new Date(curJob.started_at).toLocaleTimeString()} • Estimated completion: <b>${compTime}</b>
@@ -605,14 +608,18 @@ async function fetchPrintersData() {
 
         if (connectedGrid) {
             if (connected.length === 0) {
-                connectedGrid.innerHTML = '<div class="glass-card text-muted text-center p-3">No printers currently connected</div>';
+                connectedGrid.innerHTML = '<div class="glass-card text-muted text-center p-3">No printers currently connected. Click "Scan for Printers" or "+ Add Printer".</div>';
             } else {
                 connectedGrid.innerHTML = connected.map(p => `
                     <div class="printer-card ${p.is_default ? 'default-printer' : ''}">
                         <div class="printer-header">
                             <div>
                                 <div class="printer-name">${escapeHtml(p.name)}</div>
-                                <div class="printer-model">${escapeHtml(p.model)} • ${p.connection_type}</div>
+                                <div class="printer-model">${escapeHtml(p.model)} • ${p.connection_type} ${p.ip_address ? `(${escapeHtml(p.ip_address)})` : ''}</div>
+                                <div style="display:flex; gap:6px; margin-top:4px;">
+                                    <span class="status-tag ${p.supports_color ? 'tag-paid' : 'tag-queued'}">${p.supports_color ? 'COLOR' : 'B&W ONLY'}</span>
+                                    <span class="status-tag tag-queued">${p.supports_duplex ? 'DUPLEX' : 'SIMPLEX'}</span>
+                                </div>
                             </div>
                             <span class="status-pill online"><span class="status-dot"></span> CONNECTED</span>
                         </div>
@@ -620,14 +627,15 @@ async function fetchPrintersData() {
                             <span>Paper Tray: <b>${escapeHtml(p.paper_tray_status || 'OK')}</b></span>
                             <span>Toner: <b>${p.toner_level !== null ? p.toner_level + '%' : 'N/A'}</b></span>
                         </div>
-                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
                             <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
                                 <input type="checkbox" onchange="toggleDefaultPrinter('${p.id}', this.checked)" ${p.is_default ? 'checked' : ''}>
                                 Default for auto-print
                             </label>
                             <div class="btn-action-group">
                                 <button class="btn btn-sm btn-secondary" onclick="testPrint('${p.id}')">Test Page</button>
-                                <button class="btn btn-sm btn-ghost text-coral" onclick="disconnectPrinter('${p.id}')">Disconnect</button>
+                                <button class="btn btn-sm btn-ghost" onclick="disconnectPrinter('${p.id}')">Disconnect</button>
+                                <button class="btn btn-sm btn-ghost text-coral" onclick="deletePrinter('${p.id}')" title="Delete Printer">✕</button>
                             </div>
                         </div>
                     </div>
@@ -637,23 +645,27 @@ async function fetchPrintersData() {
 
         if (availableGrid) {
             if (available.length === 0) {
-                availableGrid.innerHTML = '<div class="glass-card text-muted text-center p-3">No other printers discovered</div>';
+                availableGrid.innerHTML = '<div class="glass-card text-muted text-center p-3">No other available/offline printers</div>';
             } else {
                 availableGrid.innerHTML = available.map(p => `
                     <div class="printer-card">
                         <div class="printer-header">
                             <div>
                                 <div class="printer-name">${escapeHtml(p.name)}</div>
-                                <div class="printer-model">${escapeHtml(p.model)} • ${p.connection_type} ${p.ip_address ? `(${p.ip_address})` : ''}</div>
+                                <div class="printer-model">${escapeHtml(p.model)} • ${p.connection_type} ${p.ip_address ? `(${escapeHtml(p.ip_address)})` : ''}</div>
+                                <div style="display:flex; gap:6px; margin-top:4px;">
+                                    <span class="status-tag ${p.supports_color ? 'tag-paid' : 'tag-queued'}">${p.supports_color ? 'COLOR' : 'B&W ONLY'}</span>
+                                    <span class="status-tag tag-queued">${p.supports_duplex ? 'DUPLEX' : 'SIMPLEX'}</span>
+                                </div>
                             </div>
                             <span class="status-tag ${p.status === 'driver_missing' ? 'tag-failed' : 'tag-queued'}">${p.status.toUpperCase()}</span>
                         </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-                            ${p.status === 'driver_missing' ? 
-                                `<span class="text-muted" style="font-size:0.78rem;">Driver missing. Install via Print Agent setup.</span>` :
-                                `<span class="text-muted" style="font-size:0.78rem;">Ready to connect</span>`
-                            }
-                            <button class="btn btn-sm btn-primary" ${p.status === 'driver_missing' ? 'disabled' : ''} onclick="connectPrinter('${p.id}')">Connect</button>
+                            <span class="text-muted" style="font-size:0.78rem;">Ready to connect</span>
+                            <div class="btn-action-group">
+                                <button class="btn btn-sm btn-primary" onclick="connectPrinter('${p.id}')">Connect</button>
+                                <button class="btn btn-sm btn-ghost text-coral" onclick="deletePrinter('${p.id}')" title="Delete Printer">✕</button>
+                            </div>
                         </div>
                     </div>
                 `).join('');
@@ -668,8 +680,8 @@ async function scanPrintersTrigger() {
     const btnText = document.getElementById('scan-btn-text');
     if (btnText) btnText.textContent = 'Scanning...';
     try {
-        await apiRequest('/printers/scan', { method: 'POST' });
-        showToast("Printer discovery scan completed!", "success");
+        const res = await apiRequest('/printers/scan', { method: 'POST' });
+        showToast(res.message || "Printer discovery scan completed!", "success");
         await fetchPrintersData();
         await fetchSystemStatus();
     } finally {
@@ -701,6 +713,16 @@ async function disconnectPrinter(id) {
     try {
         await apiRequest(`/printers/${id}/disconnect`, { method: 'POST' });
         showToast("Printer disconnected", "warning");
+        fetchPrintersData();
+        fetchSystemStatus();
+    } catch (err) {}
+}
+
+async function deletePrinter(id) {
+    if (!confirm("Are you sure you want to remove this printer?")) return;
+    try {
+        await apiRequest(`/printers/${id}`, { method: 'DELETE' });
+        showToast("Printer removed", "info");
         fetchPrintersData();
         fetchSystemStatus();
     } catch (err) {}
@@ -979,6 +1001,44 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast("Schedule exception created!", "success");
             closeModal('add-exception-modal');
             fetchScheduleData();
+            fetchSystemStatus();
+        } catch (err) {}
+    });
+
+    // Add Printer modal
+    document.getElementById('btn-open-add-printer')?.addEventListener('click', () => openModal('add-printer-modal'));
+    document.getElementById('printer-new-connection')?.addEventListener('change', (e) => {
+        const ipGroup = document.getElementById('printer-ip-group');
+        if (ipGroup) ipGroup.style.display = e.target.value === 'Network' ? 'block' : 'none';
+    });
+
+    document.getElementById('add-printer-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nameVal = document.getElementById('printer-new-name').value.trim();
+        const modelVal = document.getElementById('printer-new-model').value.trim();
+        const connVal = document.getElementById('printer-new-connection').value;
+        const ipVal = document.getElementById('printer-new-ip').value.trim();
+        const colorVal = document.getElementById('printer-new-color').checked;
+        const duplexVal = document.getElementById('printer-new-duplex').checked;
+
+        try {
+            await apiRequest('/printers', {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: nameVal,
+                    model: modelVal || nameVal,
+                    connection_type: connVal,
+                    ip_address: connVal === 'Network' ? ipVal : null,
+                    supports_color: colorVal,
+                    supports_duplex: duplexVal,
+                    status: 'connected',
+                    is_default: false
+                })
+            });
+            showToast(`Printer '${nameVal}' added successfully!`, "success");
+            closeModal('add-printer-modal');
+            document.getElementById('add-printer-form').reset();
+            fetchPrintersData();
             fetchSystemStatus();
         } catch (err) {}
     });

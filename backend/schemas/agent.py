@@ -7,6 +7,7 @@ class AgentHeartbeatRequest(BaseModel):
     agent_id: str
     status: str = "ONLINE"  # ONLINE, BUSY
     printer_status: str = "READY"  # READY, PRINTING, ERROR, OUT_OF_PAPER
+    printers: Optional[List[dict]] = None
     metadata: Optional[dict] = None
 
 
@@ -18,6 +19,8 @@ class AgentHeartbeatResponse(BaseModel):
 
 class JobClaimRequest(BaseModel):
     agent_id: str
+    printer_id: Optional[str] = None
+    printer_name: Optional[str] = None
 
 
 class PrintJobFileDetail(BaseModel):
@@ -37,11 +40,15 @@ class JobClaimResponse(BaseModel):
     order_id: Optional[str] = None
     order_code: Optional[str] = None
     pickup_token: Optional[str] = None
+    printer_id: Optional[str] = None
+    printer_name: Optional[str] = None
     files: List[PrintJobFileDetail] = []
 
 
 class JobStatusUpdateRequest(BaseModel):
     agent_id: str
     status: str  # STARTED, SUCCESS, FAILED
+    printer_id: Optional[str] = None
+    printer_name: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None

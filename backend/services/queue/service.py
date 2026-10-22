@@ -12,6 +12,7 @@ from backend.models.audit import AuditLog
 from backend.models.configuration import PrintConfiguration
 from backend.models.file import OrderFile
 from backend.models.order import Order
+from backend.models.printer import Printer
 from backend.models.queue import PrintAttempt, PrintJob, QueueEntry
 from backend.schemas.agent import JobClaimResponse, PrintJobFileDetail
 from backend.services.orders.state_machine import OrderState, transition_order
@@ -90,10 +91,18 @@ async def enqueue_verified_order(session: AsyncSession, order: Order) -> PrintJo
     return job
 
 
-async def claim_next_job(session: AsyncSession, agent_id: str) -> JobClaimResponse:
+async def claim_next_job(
+    session: AsyncSession,
+    agent_id: str,
+    printer_id: Optional[str] = None,
+    printer_name: Optional[str] = None,
+) -> JobClaimResponse:
     """
-    Atomic claim of next eligible waiting print job by local Print Agent.
-    Checks effective print service state and ensures job is not held.
+    Atomic claim of next eligible waiting print job by local Print Agent for a specific or idle printer.
+    Guarantees:
+    1. One printer prints only one order at a time.
+    2. The order is NEVER split across multiple printers (all files in an order are printed on the same printer).
+    3. Multiple printers operate concurrently on separate orders.
     """
     now = datetime.now(timezone.utc)
 
@@ -103,6 +112,53 @@ async def claim_next_job(session: AsyncSession, agent_id: str) -> JobClaimRespon
         logger.info(f"Job claim skipped: print service is {state['effective_status']} ({state['reason']})")
         return JobClaimResponse(job_found=False)
 
+    # 1. Resolve Target Printer
+    target_printer = None
+    if printer_id:
+        p_res = await session.execute(select(Printer).where(Printer.id == printer_id))
+        target_printer = p_res.scalar_one_or_none()
+        if not target_printer or target_printer.status != "connected":
+            logger.info(f"Target printer {printer_id} is not connected or found")
+            return JobClaimResponse(job_found=False)
+    elif printer_name:
+        p_res = await session.execute(select(Printer).where(Printer.name == printer_name))
+        target_printer = p_res.scalar_one_or_none()
+
+    # 2. If target printer is specified, verify it is NOT already busy printing an active job
+    if target_printer:
+        busy_q = select(func.count(PrintJob.id)).where(
+            PrintJob.status == "PRINTING",
+            PrintJob.printer_id == target_printer.id,
+        )
+        busy_res = await session.execute(busy_q)
+        busy_count = busy_res.scalar_one() or 0
+        if busy_count > 0:
+            logger.info(f"Printer {target_printer.name} ({target_printer.id}) is currently busy with another order")
+            return JobClaimResponse(job_found=False)
+
+    # 3. If target printer is NOT specified, query connected and currently idle printers
+    idle_printers = []
+    connected_printers = []
+    if not target_printer:
+        all_printers_res = await session.execute(
+            select(Printer).where(Printer.status == "connected").order_by(Printer.is_default.desc())
+        )
+        connected_printers = all_printers_res.scalars().all()
+
+        if connected_printers:
+            busy_p_query = select(PrintJob.printer_id).where(
+                PrintJob.status == "PRINTING",
+                PrintJob.printer_id.isnot(None),
+            )
+            busy_p_res = await session.execute(busy_p_query)
+            busy_printer_ids = set(busy_p_res.scalars().all())
+
+            idle_printers = [p for p in connected_printers if p.id not in busy_printer_ids]
+            if not idle_printers:
+                logger.info("All connected printers are currently busy")
+                return JobClaimResponse(job_found=False)
+
+    # 4. Query waiting print jobs
     query = (
         select(PrintJob)
         .join(QueueEntry, QueueEntry.print_job_id == PrintJob.id)
@@ -117,28 +173,72 @@ async def claim_next_job(session: AsyncSession, agent_id: str) -> JobClaimRespon
             selectinload(PrintJob.queue_entry),
             selectinload(PrintJob.attempts),
         )
-        .limit(1)
     )
     res = await session.execute(query)
-    job = res.scalar_one_or_none()
+    waiting_jobs = res.scalars().all()
 
-    if not job:
+    if not waiting_jobs:
         return JobClaimResponse(job_found=False)
 
-    job.status = "PRINTING"
-    job.started_at = now
-    if job.queue_entry:
-        job.queue_entry.status = "PROCESSING"
+    # 5. Match entire order to an available printer
+    assigned_job = None
+    assigned_printer = target_printer
 
-    attempt_number = len(job.attempts) + 1
+    if target_printer:
+        for job in waiting_jobs:
+            order_requires_color = any(
+                f.configuration and f.configuration.color_mode == "color"
+                for f in job.order.files if f.status != "DELETED"
+            )
+            if order_requires_color and not target_printer.supports_color:
+                continue
+            assigned_job = job
+            break
+    elif idle_printers:
+        for job in waiting_jobs:
+            order_requires_color = any(
+                f.configuration and f.configuration.color_mode == "color"
+                for f in job.order.files if f.status != "DELETED"
+            )
+            for p in idle_printers:
+                if order_requires_color and not p.supports_color:
+                    continue
+                assigned_job = job
+                assigned_printer = p
+                break
+            if assigned_job:
+                break
+    else:
+        # If no printer registry exists, fall back to first waiting job
+        assigned_job = waiting_jobs[0]
+        assigned_printer = None
+
+    if not assigned_job:
+        return JobClaimResponse(job_found=False)
+
+    # 6. Assign the ENTIRE order to this printer
+    assigned_job.status = "PRINTING"
+    assigned_job.started_at = now
+    if assigned_printer:
+        assigned_job.printer_id = assigned_printer.id
+        assigned_job.printer_name = assigned_printer.name
+    elif printer_name:
+        assigned_job.printer_name = printer_name
+
+    if assigned_job.queue_entry:
+        assigned_job.queue_entry.status = "PROCESSING"
+
+    attempt_number = len(assigned_job.attempts) + 1
 
     # Create PrintAttempt record
     attempt = PrintAttempt(
-        print_job_id=job.id,
+        print_job_id=assigned_job.id,
         attempt_number=attempt_number,
         mode="AUTO",
         status="STARTED",
         agent_id=agent_id,
+        printer_id=assigned_job.printer_id,
+        printer_name=assigned_job.printer_name,
         started_at=now,
     )
     session.add(attempt)
@@ -146,16 +246,21 @@ async def claim_next_job(session: AsyncSession, agent_id: str) -> JobClaimRespon
     # Transition order state to PRINTING
     await transition_order(
         session=session,
-        order=job.order,
+        order=assigned_job.order,
         target_state=OrderState.PRINTING,
         actor_type="AGENT",
         actor_id=agent_id,
-        metadata={"job_id": job.id, "attempt_number": attempt_number},
+        metadata={
+            "job_id": assigned_job.id,
+            "attempt_number": attempt_number,
+            "printer_id": assigned_job.printer_id,
+            "printer_name": assigned_job.printer_name,
+        },
     )
 
-    # Build file details list
+    # Build file details list for all files of this order
     file_details = []
-    for f in job.order.files:
+    for f in assigned_job.order.files:
         if f.status == "DELETED":
             continue
         config = f.configuration
@@ -175,10 +280,12 @@ async def claim_next_job(session: AsyncSession, agent_id: str) -> JobClaimRespon
     await session.flush()
     return JobClaimResponse(
         job_found=True,
-        job_id=job.id,
-        order_id=job.order.id,
-        order_code=job.order.order_code,
-        pickup_token=job.order.pickup_token,
+        job_id=assigned_job.id,
+        order_id=assigned_job.order.id,
+        order_code=assigned_job.order.order_code,
+        pickup_token=assigned_job.order.pickup_token,
+        printer_id=assigned_job.printer_id,
+        printer_name=assigned_job.printer_name,
         files=file_details,
     )
 
@@ -203,6 +310,7 @@ async def update_job_status(
             selectinload(PrintJob.queue_entry),
             selectinload(PrintJob.attempts),
         )
+        .execution_options(populate_existing=True)
     )
     res = await session.execute(query)
     job = res.scalar_one_or_none()

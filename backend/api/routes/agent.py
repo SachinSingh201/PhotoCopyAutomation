@@ -65,7 +65,12 @@ async def claim_job_endpoint(
     session: AsyncSession = Depends(get_db),
     _: str = Depends(verify_agent_token),
 ):
-    res = await claim_next_job(session=session, agent_id=payload.agent_id)
+    res = await claim_next_job(
+        session=session,
+        agent_id=payload.agent_id,
+        printer_id=payload.printer_id,
+        printer_name=payload.printer_name,
+    )
     await session.commit()
     return res
 

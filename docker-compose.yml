@@ -1,32 +1,49 @@
 version: '3.8'
 
 services:
+  # ============================================================================
+  # PostgreSQL Database Service
+  # ============================================================================
   postgres:
     image: postgres:16-alpine
-    container_name: whatsapp_print_db
+    container_name: printshop_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
-      POSTGRES_DB: whatsapp_print
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_print}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d whatsapp_print"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-whatsapp_print}"]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 5s
+    networks:
+      - printshop_network
 
+  # ============================================================================
+  # FastAPI Core Backend & Webhook Server
+  # ============================================================================
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: whatsapp_print_backend
+    container_name: printshop_backend
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgrespassword@postgres:5432/whatsapp_print
-      - DATABASE_SYNC_URL=postgresql://postgres:postgrespassword@postgres:5432/whatsapp_print
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword}@postgres:5432/${POSTGRES_DB:-whatsapp_print}
+      - DATABASE_SYNC_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgrespassword}@postgres:5432/${POSTGRES_DB:-whatsapp_print}
       - STORAGE_ROOT=/app/storage/private
+      - HOST=0.0.0.0
+      - PORT=8000
     ports:
       - "8000:8000"
     volumes:
@@ -34,6 +51,37 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - printshop_network
 
+  # ============================================================================
+  # OpenWA Gateway Service (Engine: whatsapp-web.js)
+  # ============================================================================
+  openwa:
+    image: rmyndharis/openwa:latest
+    container_name: printshop_openwa
+    restart: unless-stopped
+    stop_grace_period: 75s
+    environment:
+      - DEFAULT_ENGINE=whatsapp-web.js
+      - PORT=2785
+      - NODE_ENV=production
+    ports:
+      - "2785:2785"
+    volumes:
+      - openwa_data:/app/data
+    networks:
+      - printshop_network
+
+# ==============================================================================
+# Persistent Volumes & Networks
+# ==============================================================================
 volumes:
   postgres_data:
+    driver: local
+  openwa_data:
+    driver: local
+
+networks:
+  printshop_network:
+    driver: bridge

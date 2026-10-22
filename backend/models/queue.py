@@ -29,6 +29,9 @@ class PrintJob(Base, TimestampMixin):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    printer_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    printer_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     order: Mapped["Order"] = relationship("Order", back_populates="print_jobs")
     attempts: Mapped[List["PrintAttempt"]] = relationship("PrintAttempt", back_populates="print_job", cascade="all, delete-orphan", order_by="PrintAttempt.attempt_number")
     queue_entry: Mapped[Optional["QueueEntry"]] = relationship("QueueEntry", back_populates="print_job", uselist=False, cascade="all, delete-orphan")
@@ -43,6 +46,8 @@ class PrintAttempt(Base, TimestampMixin):
     mode: Mapped[str] = mapped_column(String(16), default="AUTO", nullable=False)  # AUTO, MANUAL
     status: Mapped[str] = mapped_column(String(32), default="STARTED", nullable=False)  # STARTED, SUCCESS, FAILED
     agent_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    printer_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    printer_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

@@ -1,0 +1,36 @@
+# Python virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Git and IDE files
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+whatsapp_print.db
+
+# Storage / uploads
+storage/private/*
+!storage/private/.gitkeep
+
+# Python cache & tests
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Project docs and logs
+.unsnooze/
+graphify-out/
+*.log

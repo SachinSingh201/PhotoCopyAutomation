@@ -119,10 +119,25 @@ async def is_inside_print_window(
     """
     Checks if check_dt falls within a valid print window,
     checking exception overrides first, then standard weekly schedule.
+    Converts check_dt to shop's configured local timezone.
     """
-    target_date = check_dt.date()
-    target_time = check_dt.time()
-    day_of_week = check_dt.weekday()
+    shop_res = await session.execute(select(ShopSetting).limit(1))
+    shop_setting = shop_res.scalar_one_or_none()
+    tz_str = shop_setting.timezone if shop_setting and shop_setting.timezone else "Asia/Kolkata"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = timezone.utc
+
+    if check_dt.tzinfo is not None:
+        local_dt = check_dt.astimezone(tz)
+    else:
+        local_dt = check_dt.replace(tzinfo=timezone.utc).astimezone(tz)
+
+    target_date = local_dt.date()
+    target_time = local_dt.time()
+    day_of_week = local_dt.weekday()
 
     # Check date exceptions
     exc_res = await session.execute(
@@ -158,7 +173,7 @@ async def is_inside_print_window(
         return False, "Outside default operating hours (08:00 - 20:00)"
 
     if not sched.enabled:
-        return False, f"Printing is disabled on {check_dt.strftime('%A')}"
+        return False, f"Printing is disabled on {local_dt.strftime('%A')}"
 
     # Handle standard vs overnight hours
     if sched.open_time <= sched.close_time:
@@ -176,7 +191,21 @@ async def get_next_print_window(
     session: AsyncSession, check_dt: datetime
 ) -> Optional[datetime]:
     """Finds the next datetime when the shop opens, searching up to 14 days ahead."""
-    cur_date = check_dt.date()
+    shop_res = await session.execute(select(ShopSetting).limit(1))
+    shop_setting = shop_res.scalar_one_or_none()
+    tz_str = shop_setting.timezone if shop_setting and shop_setting.timezone else "Asia/Kolkata"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_str)
+    except Exception:
+        tz = timezone.utc
+
+    if check_dt.tzinfo is not None:
+        local_dt = check_dt.astimezone(tz)
+    else:
+        local_dt = check_dt.replace(tzinfo=timezone.utc).astimezone(tz)
+
+    cur_date = local_dt.date()
 
     for day_offset in range(14):
         eval_date = cur_date + timedelta(days=day_offset)

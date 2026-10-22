@@ -89,25 +89,48 @@ async def test_admin_notifications_and_alerts(client: AsyncClient, db_session, a
 
 @pytest.mark.asyncio
 async def test_admin_printers_management(client: AsyncClient, db_session, admin_headers):
-    # 1. List printers
+    # 1. Add printer manually
+    add_res = await client.post(
+        "/admin/printers",
+        headers=admin_headers,
+        json={
+            "name": "Shop Main Brother L2321D",
+            "model": "Brother HL-L2320D series",
+            "connection_type": "USB",
+            "status": "connected",
+            "is_default": True,
+            "supports_color": False,
+            "supports_duplex": True,
+        },
+    )
+    assert add_res.status_code == 201
+    created_printer = add_res.json()
+    printer_id = created_printer["id"]
+    assert created_printer["name"] == "Shop Main Brother L2321D"
+
+    # 2. List printers
     res = await client.get("/admin/printers", headers=admin_headers)
     assert res.status_code == 200
     printers = res.json()
     assert len(printers) >= 1
-    printer_id = printers[0]["id"]
 
-    # 2. Scan printers
+    # 3. Scan printers
     scan_res = await client.post("/admin/printers/scan", headers=admin_headers)
     assert scan_res.status_code == 200
 
-    # 3. Test page
+    # 4. Test page
     test_res = await client.post(f"/admin/printers/{printer_id}/test-page", headers=admin_headers)
     assert test_res.status_code == 200
 
-    # 4. Set default
+    # 5. Set default
     patch_res = await client.patch(f"/admin/printers/{printer_id}", headers=admin_headers, json={"is_default": True})
     assert patch_res.status_code == 200
     assert patch_res.json()["is_default"] is True
+
+    # 6. Delete printer
+    del_res = await client.delete(f"/admin/printers/{printer_id}", headers=admin_headers)
+    assert del_res.status_code == 200
+    assert del_res.json()["status"] == "success"
 
 
 @pytest.mark.asyncio

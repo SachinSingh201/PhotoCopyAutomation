@@ -27,11 +27,19 @@ class Settings(BaseSettings):
     MAX_FILES_PER_ORDER: int = 10
     ALLOWED_MIME_TYPES: list[str] = ["application/pdf"]
 
-    # WhatsApp API
+    # WhatsApp API & Provider Selection
+    WHATSAPP_PROVIDER: str = "openwa"  # "openwa" (self-hosted / dev) | "meta" (Meta Cloud API / prod) | "mock"
     WHATSAPP_PHONE_NUMBER_ID: str = "mock_phone_number_id"
     WHATSAPP_TOKEN: str = "mock_whatsapp_token"
     WHATSAPP_VERIFY_TOKEN: str = "mock_verify_token"
     WHATSAPP_API_VERSION: str = "v19.0"
+
+    # OpenWA Self-Hosted Gateway (Engine: whatsapp-web.js)
+    OPENWA_BASE_URL: str = "http://localhost:2785"
+    OPENWA_API_KEY: str = ""
+    OPENWA_SESSION_ID: str = "printshop_dev"
+    OPENWA_ENGINE: str = "whatsapp-web.js"  # Engine: "whatsapp-web.js" (default) or "baileys"
+    OPENWA_WEBHOOK_SECRET: str = ""
 
     # LLM / NLP Service
     LLM_PROVIDER: str = "mock"  # "gemini" | "openai" | "mock"

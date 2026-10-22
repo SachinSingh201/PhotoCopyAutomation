@@ -34,6 +34,7 @@ from backend.schemas.admin import (
     HoldJobRequest,
     NotificationItem,
     PricingUpdateRequest,
+    PrinterCreateRequest,
     PrinterItem,
     PrinterPatchRequest,
     PrintingScheduleItem,
@@ -61,67 +62,105 @@ from backend.services.scheduling.service import (
     get_next_print_window,
     seed_default_schedule_if_empty,
 )
+from backend.services.whatsapp.service import whatsapp_service
 
 router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(verify_admin_secret)])
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
-async def seed_default_printers_if_empty(session: AsyncSession):
-    """Seed initial printers if table is empty."""
-    res = await session.execute(select(func.count(Printer.id)))
-    count = res.scalar_one() or 0
-    if count == 0:
-        session.add(
-            Printer(
-                name="HP LaserJet Pro MFP M428fdw",
-                model="HP LaserJet Pro M428fdw",
-                connection_type="USB",
-                ip_address=None,
-                status="connected",
-                is_default=True,
-                supports_color=False,
-                supports_duplex=True,
-                paper_tray_status="Tray 1: A4 (90% full)",
-                toner_level=82,
+def discover_os_printers() -> List[Dict[str, Any]]:
+    """Discovers real local and network printers from the host operating system."""
+    printers = []
+    # 1. Native Windows Spooler via win32print
+    try:
+        import win32print
+        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+        default_p = None
+        try:
+            default_p = win32print.GetDefaultPrinter()
+        except Exception:
+            pass
+
+        for p in win32print.EnumPrinters(flags):
+            name = p[2]
+            conn = "Network" if ("\\" in name or "net" in name.lower()) else "USB"
+            printers.append({
+                "name": name,
+                "model": name,
+                "connection_type": conn,
+                "ip_address": None,
+                "status": "connected",
+                "is_default": (name == default_p),
+                "supports_color": True,
+                "supports_duplex": True,
+            })
+    except Exception:
+        pass
+
+    # 2. Windows PowerShell Get-Printer fallback
+    if not printers:
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Printer | Select-Object Name, DriverName, PortName, Type, PrinterStatus | ConvertTo-Json"],
+                capture_output=True, text=True, timeout=5
             )
-        )
-        session.add(
-            Printer(
-                name="Canon imageCLASS LBP6230dw",
-                model="Canon LBP6230dw Series",
-                connection_type="Network",
-                ip_address="192.168.1.145",
-                status="available",
-                is_default=False,
-                supports_color=False,
-                supports_duplex=True,
-                paper_tray_status="Tray 1: A4 (60% full)",
-                toner_level=45,
-            )
-        )
-        session.add(
-            Printer(
-                name="Epson EcoTank L3250",
-                model="Epson L3250 Series Color",
-                connection_type="USB",
-                ip_address=None,
-                status="driver_missing",
-                is_default=False,
-                supports_color=True,
-                supports_duplex=False,
-                paper_tray_status="Tray 1: A4 (Empty)",
-                toner_level=95,
-            )
-        )
-        await session.flush()
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout.strip())
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    name = item.get("Name")
+                    if not name:
+                        continue
+                    driver = item.get("DriverName", name)
+                    port = str(item.get("PortName", ""))
+                    conn = "Network" if ("." in port or "IP" in port or "\\" in name) else "USB"
+                    printers.append({
+                        "name": name,
+                        "model": driver,
+                        "connection_type": conn,
+                        "ip_address": port if "." in port else None,
+                        "status": "connected",
+                        "is_default": False,
+                        "supports_color": True,
+                        "supports_duplex": True,
+                    })
+        except Exception:
+            pass
+
+    # 3. Unix/Linux lpstat fallback
+    if not printers:
+        try:
+            import subprocess
+            res = subprocess.run(["lpstat", "-p"], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if line.startswith("printer "):
+                        parts = line.split()
+                        if len(parts) > 1:
+                            pname = parts[1]
+                            printers.append({
+                                "name": pname,
+                                "model": pname,
+                                "connection_type": "Local",
+                                "ip_address": None,
+                                "status": "connected",
+                                "is_default": False,
+                                "supports_color": True,
+                                "supports_duplex": True,
+                            })
+        except Exception:
+            pass
+
+    return printers
 
 
 # 1. System Status
 @router.get("/system/status", response_model=SystemStatusResponse)
 async def get_system_status(session: AsyncSession = Depends(get_db)):
     """Returns topbar and sidebar status strip metrics."""
-    await seed_default_printers_if_empty(session)
     now = datetime.now(timezone.utc)
 
     # 1. Agent status
@@ -130,8 +169,9 @@ async def get_system_status(session: AsyncSession = Depends(get_db)):
     )
     agent = agent_q.scalar_one_or_none()
     agent_status = "OFFLINE"
-    if agent:
-        diff = (now - agent.last_seen_at).total_seconds()
+    if agent and agent.last_seen_at:
+        last_seen = agent.last_seen_at if agent.last_seen_at.tzinfo else agent.last_seen_at.replace(tzinfo=timezone.utc)
+        diff = (now - last_seen).total_seconds()
         if diff <= settings.AGENT_HEARTBEAT_TIMEOUT_SECONDS:
             agent_status = agent.status
 
@@ -346,6 +386,8 @@ async def get_current_print_job(session: AsyncSession = Depends(get_db)):
         total_pages=order.total_pages,
         color_mode=cfg.color_mode if cfg else "bw",
         default_sides=cfg.default_sides if cfg else "single",
+        printer_id=job.printer_id,
+        printer_name=job.printer_name,
         started_at=started,
         estimated_duration_seconds=job.estimated_duration_seconds,
         estimated_completion_at=est_comp,
@@ -428,8 +470,9 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
     agent = agent_q.scalar_one_or_none()
     agent_status = "OFFLINE"
     printer_status = "OFFLINE"
-    if agent:
-        diff = (now - agent.last_seen_at).total_seconds()
+    if agent and agent.last_seen_at:
+        last_seen = agent.last_seen_at if agent.last_seen_at.tzinfo else agent.last_seen_at.replace(tzinfo=timezone.utc)
+        diff = (now - last_seen).total_seconds()
         if diff <= settings.AGENT_HEARTBEAT_TIMEOUT_SECONDS:
             agent_status = agent.status
             printer_status = agent.printer_status
@@ -460,7 +503,6 @@ async def get_admin_dashboard(session: AsyncSession = Depends(get_db)):
 @router.get("/printers", response_model=List[PrinterItem])
 async def list_printers(session: AsyncSession = Depends(get_db)):
     """List all connected, available, and discovered printers."""
-    await seed_default_printers_if_empty(session)
     res = await session.execute(select(Printer).order_by(Printer.is_default.desc(), Printer.name.asc()))
     printers = res.scalars().all()
     return [
@@ -482,11 +524,91 @@ async def list_printers(session: AsyncSession = Depends(get_db)):
     ]
 
 
+@router.post("/printers", response_model=PrinterItem, status_code=status.HTTP_201_CREATED)
+async def create_printer(payload: PrinterCreateRequest, session: AsyncSession = Depends(get_db)):
+    """Add a new printer manually (e.g. Network IP or USB printer)."""
+    existing_res = await session.execute(select(Printer).where(Printer.name == payload.name))
+    if existing_res.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail=f"Printer with name '{payload.name}' already exists")
+
+    if payload.is_default:
+        await session.execute(update(Printer).values(is_default=False))
+
+    printer = Printer(
+        name=payload.name,
+        model=payload.model or payload.name,
+        connection_type=payload.connection_type,
+        ip_address=payload.ip_address,
+        status=payload.status,
+        is_default=payload.is_default,
+        supports_color=payload.supports_color,
+        supports_duplex=payload.supports_duplex,
+        paper_tray_status=payload.paper_tray_status or "Ready",
+        toner_level=payload.toner_level if payload.toner_level is not None else 100,
+    )
+    session.add(printer)
+    await session.commit()
+    await session.refresh(printer)
+    return printer
+
+
 @router.post("/printers/scan")
 async def scan_printers(session: AsyncSession = Depends(get_db)):
-    """Scan local OS spooler and network for printers."""
-    await seed_default_printers_if_empty(session)
-    return {"status": "success", "message": "Printer scan completed"}
+    """Scan local OS spooler and network for real connected printers."""
+    discovered = discover_os_printers()
+    added_count = 0
+    updated_count = 0
+
+    for dp in discovered:
+        res = await session.execute(select(Printer).where(Printer.name == dp["name"]))
+        existing = res.scalar_one_or_none()
+        if not existing:
+            new_p = Printer(
+                name=dp["name"],
+                model=dp["model"],
+                connection_type=dp["connection_type"],
+                ip_address=dp.get("ip_address"),
+                status=dp["status"],
+                is_default=dp["is_default"],
+                supports_color=dp["supports_color"],
+                supports_duplex=dp["supports_duplex"],
+                paper_tray_status="Ready",
+                toner_level=100,
+            )
+            session.add(new_p)
+            added_count += 1
+        else:
+            existing.status = dp["status"]
+            if dp["is_default"]:
+                existing.is_default = True
+            updated_count += 1
+
+    # If no printer is marked default but printers exist, make the first one default
+    def_res = await session.execute(select(Printer).where(Printer.is_default == True))
+    if not def_res.scalar_one_or_none():
+        first_res = await session.execute(select(Printer).order_by(Printer.name.asc()).limit(1))
+        first_p = first_res.scalar_one_or_none()
+        if first_p:
+            first_p.is_default = True
+
+    await session.commit()
+    return {
+        "status": "success",
+        "message": f"Scan completed: {len(discovered)} detected ({added_count} added, {updated_count} updated)",
+        "discovered_count": len(discovered),
+    }
+
+
+@router.delete("/printers/{id}")
+async def delete_printer(id: str, session: AsyncSession = Depends(get_db)):
+    """Delete a printer."""
+    res = await session.execute(select(Printer).where(Printer.id == id))
+    p = res.scalar_one_or_none()
+    if not p:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    await session.delete(p)
+    await session.commit()
+    return {"status": "success", "id": id, "message": "Printer deleted"}
 
 
 @router.post("/printers/{id}/connect")
@@ -521,7 +643,6 @@ async def update_printer(id: str, payload: PrinterPatchRequest, session: AsyncSe
         raise HTTPException(status_code=404, detail="Printer not found")
 
     if payload.is_default is not None and payload.is_default:
-        # Enforce single default printer
         await session.execute(update(Printer).values(is_default=False))
         p.is_default = True
     elif payload.is_default is False:
@@ -529,6 +650,14 @@ async def update_printer(id: str, payload: PrinterPatchRequest, session: AsyncSe
 
     if payload.status:
         p.status = payload.status
+    if payload.supports_color is not None:
+        p.supports_color = payload.supports_color
+    if payload.supports_duplex is not None:
+        p.supports_duplex = payload.supports_duplex
+    if payload.paper_tray_status is not None:
+        p.paper_tray_status = payload.paper_tray_status
+    if payload.toner_level is not None:
+        p.toner_level = payload.toner_level
 
     await session.commit()
     return {"status": "success", "id": id, "is_default": p.is_default, "printer_status": p.status}
@@ -623,6 +752,8 @@ async def list_admin_queue(
                 estimated_duration_seconds=job.estimated_duration_seconds,
                 eta_seconds=eta,
                 print_mode=order.print_mode,
+                printer_id=job.printer_id,
+                printer_name=job.printer_name,
                 enqueued_at=job.queue_entry.enqueued_at if job.queue_entry else job.created_at,
             )
         )
@@ -1110,10 +1241,55 @@ async def update_pricing(payload: PricingUpdateRequest, session: AsyncSession = 
         )
     )
     await session.commit()
-    return {"status": "success", "pricing": payload.model_dump()}
+
+# 13. WhatsApp & OpenWA Gateway Controls
+@router.get("/whatsapp/status")
+async def get_whatsapp_gateway_status():
+    """Returns status of WhatsApp provider (OpenWA or Meta Cloud API)."""
+    provider = settings.WHATSAPP_PROVIDER
+    info = {
+        "provider": provider,
+        "is_openwa": (provider == "openwa"),
+    }
+    if provider == "openwa":
+        openwa_status = await whatsapp_service.get_openwa_status()
+        info.update({
+            "engine": settings.OPENWA_ENGINE,
+            "session_id": settings.OPENWA_SESSION_ID,
+            "base_url": settings.OPENWA_BASE_URL,
+            "gateway_status": openwa_status,
+        })
+    else:
+        info.update({
+            "phone_number_id": settings.WHATSAPP_PHONE_NUMBER_ID,
+            "api_version": settings.WHATSAPP_API_VERSION,
+        })
+    return info
 
 
-# 13. Audit Logs
+@router.get("/whatsapp/qr")
+async def get_whatsapp_qr_code():
+    """Fetches OpenWA pairing QR code if engine is waiting for WhatsApp Web link."""
+    if settings.WHATSAPP_PROVIDER != "openwa":
+        raise HTTPException(
+            status_code=400,
+            detail="QR code linking is only applicable when WHATSAPP_PROVIDER is set to 'openwa'",
+        )
+    return await whatsapp_service.get_openwa_qr()
+
+
+@router.post("/whatsapp/session/start")
+async def start_openwa_session():
+    """Starts or initializes the OpenWA session with the configured engine (whatsapp-web.js)."""
+    if settings.WHATSAPP_PROVIDER != "openwa":
+        raise HTTPException(
+            status_code=400,
+            detail="Session controls are only applicable when WHATSAPP_PROVIDER is set to 'openwa'",
+        )
+    return await whatsapp_service.openwa_adapter.ensure_session_started()
+
+
+# 14. Audit Logs
 @router.get("/audit-logs", response_model=List[AuditLogRead])
 async def list_audit_logs(
     limit: int = Query(50, le=200), session: AsyncSession = Depends(get_db)
