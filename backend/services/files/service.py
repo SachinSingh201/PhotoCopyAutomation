@@ -127,6 +127,7 @@ async def process_and_save_order_file(
     order_file = OrderFile(
         id=file_id,
         order_id=order.id,
+        order=order,
         upload_sequence=upload_sequence,
         original_filename=sanitize_filename(original_filename),
         file_hash=file_hash,

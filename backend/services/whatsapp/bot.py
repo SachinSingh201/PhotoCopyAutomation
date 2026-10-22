@@ -1,6 +1,6 @@
 import json
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -102,18 +102,35 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
     await whatsapp_service.send_text_message(to_phone=sender, text=fallback_text)
 
 
+DRAFT_STATES = [
+    OrderState.CREATED.value,
+    OrderState.FILES_UPLOADING.value,
+    OrderState.FILES_UPLOADED.value,
+    OrderState.CONFIGURATION_PENDING.value,
+    OrderState.CONFIGURED.value,
+    OrderState.PRICE_CALCULATED.value,
+    OrderState.AWAITING_CONFIRMATION.value,
+]
+
+
+async def get_active_draft_order(session: AsyncSession, user: User) -> Optional[Order]:
+    """Retrieves customer's current open draft order (where files are still being uploaded/configured)."""
+    query = (
+        select(Order)
+        .where(Order.user_id == user.id, Order.status.in_(DRAFT_STATES))
+        .options(
+            selectinload(Order.files).selectinload(OrderFile.configuration),
+            selectinload(Order.user),
+        )
+        .order_by(desc(Order.created_at))
+    )
+    result = await session.execute(query)
+    return result.scalars().first()
+
+
 async def get_active_customer_order(session: AsyncSession, user: User) -> Optional[Order]:
-    """Retrieves the customer's current open/uncompleted print order, if any."""
-    uncompleted_states = [
-        OrderState.CREATED.value,
-        OrderState.FILES_UPLOADING.value,
-        OrderState.FILES_UPLOADED.value,
-        OrderState.CONFIGURATION_PENDING.value,
-        OrderState.CONFIGURED.value,
-        OrderState.PRICE_CALCULATED.value,
-        OrderState.AWAITING_CONFIRMATION.value,
-        OrderState.PAYMENT_PENDING.value,
-    ]
+    """Retrieves customer's current open/uncompleted print order, prioritizing draft then payment pending."""
+    uncompleted_states = DRAFT_STATES + [OrderState.PAYMENT_PENDING.value]
     query = (
         select(Order)
         .where(Order.user_id == user.id, Order.status.in_(uncompleted_states))
@@ -125,6 +142,30 @@ async def get_active_customer_order(session: AsyncSession, user: User) -> Option
     )
     result = await session.execute(query)
     return result.scalars().first()
+
+
+async def get_all_active_user_orders(session: AsyncSession, user: User) -> List[Order]:
+    """Retrieves all non-final active orders for a customer (for status check and management)."""
+    active_states = DRAFT_STATES + [
+        OrderState.PAYMENT_PENDING.value,
+        OrderState.PAID.value,
+        OrderState.WAITING_FOR_PRINT_WINDOW.value,
+        OrderState.QUEUED.value,
+        OrderState.PRINTING.value,
+        OrderState.PRINTED.value,
+        OrderState.READY_FOR_PICKUP.value,
+    ]
+    query = (
+        select(Order)
+        .where(Order.user_id == user.id, Order.status.in_(active_states))
+        .options(
+            selectinload(Order.files).selectinload(OrderFile.configuration),
+            selectinload(Order.user),
+        )
+        .order_by(desc(Order.created_at))
+    )
+    result = await session.execute(query)
+    return list(result.scalars().all())
 
 
 async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, Any]) -> None:
@@ -164,10 +205,24 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         filename = doc_info.get("filename") or "document.pdf"
         mime_type = doc_info.get("mime_type") or "application/pdf"
 
-        # Create new order if customer has no active uncompleted order
+        # Check for open draft order where user can add files.
+        # If previous order is already confirmed (PAYMENT_PENDING) or completed, a fresh order is created!
+        order = await get_active_draft_order(session, user)
         if not order:
             created_order = await create_order(session=session, user=user)
             order = await get_order_by_id(session, created_order.id)
+
+        # Check maximum files per order limit
+        if len(order.files) >= settings.MAX_FILES_PER_ORDER:
+            await whatsapp_service.send_text_message(
+                to_phone=sender,
+                text=(
+                    f"⚠️ *File Limit Reached:* Order #{order.order_code} already contains {settings.MAX_FILES_PER_ORDER} files (maximum limit per order).\n\n"
+                    f"👉 Reply *CONFIRM* to lock in your order with these files.\n"
+                    f"👉 Or reply *CANCEL* to cancel this order and start over."
+                ),
+            )
+            return
 
         # Download document bytes via WhatsApp Transport Adapter
         file_bytes = await whatsapp_service.download_media(doc_info)
@@ -193,7 +248,11 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         # Transition order state
         if order.status == OrderState.CREATED.value:
             await transition_order(session, order, OrderState.FILES_UPLOADING, actor_type="CUSTOMER")
-        await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="CUSTOMER")
+            await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="CUSTOMER")
+        elif order.status == OrderState.FILES_UPLOADING.value:
+            await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="CUSTOMER")
+        elif order.status == OrderState.AWAITING_CONFIRMATION.value:
+            await transition_order(session, order, OrderState.CONFIGURATION_PENDING, actor_type="CUSTOMER")
         await session.commit()
 
         # Reload order to reflect fresh state
@@ -203,19 +262,20 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         print_charge = max(0.0, order.total_amount - base_charge)
 
         reply = (
-            f"📄 *Document Received & Analyzed!*\n"
-            f"• *File:* {order_file.original_filename}\n"
-            f"• *Page Count:* {order_file.page_count} pages\n"
-            f"• *Total Files in Order:* {len(order.files)} ({order.total_pages} total pages)\n"
+            f"📄 *Document Received & Analyzed!* (File {len(order.files)} of {settings.MAX_FILES_PER_ORDER})\n"
+            f"• *File:* {order_file.original_filename} ({order_file.page_count} pages)\n"
+            f"• *Total in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n"
             f"• *Order Code:* #{order.order_code}\n"
             f"• *Pickup Token:* *{order.pickup_token}*\n\n"
             f"💰 *Cost Estimation (Standard Single-Sided B&W):*\n"
             f"• Document Handling: ₹{base_charge:.2f}\n"
             f"• Print Charge ({order.total_pages} pages @ ₹{settings.PRICE_BW_SINGLE:.2f}/page): ₹{print_charge:.2f}\n"
             f"• *Estimated Total: ₹{order.total_amount:.2f}*\n\n"
-            f"💬 *Options:*\n"
-            f"• Reply with custom instructions: e.g. *\"Single side all pages\"*, *\"Double sided\"*, *\"Color front page\"*\n"
-            f"• Or reply *CONFIRM* to lock in your order with this price!"
+            f"💬 *What to do next:*\n"
+            f"• Send another PDF to add more files to this order (up to {settings.MAX_FILES_PER_ORDER})\n"
+            f"• Reply with custom print instructions: e.g. *\"Double sided\"*, *\"Color front page\"*\n"
+            f"• Reply *CONFIRM* to lock in your order with this price\n"
+            f"• Or reply *CANCEL* to cancel this order anytime"
         )
         await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
@@ -240,8 +300,39 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         user_text = event.get("text", "").strip()
         cmd = user_text.upper()
 
-        # Subcase C1: Confirmation command
-        if cmd in ["CONFIRM", "CONFIRM & PAY", "CONFIRM ORDER", "PAY"]:
+        # Subcase C1: Cancellation command
+        if cmd in ["CANCEL", "CANCEL ORDER", "CANCEL PRINT", "ABORT", "RESET"]:
+            active_orders = await get_all_active_user_orders(session, user)
+            cancellable = [
+                o for o in active_orders 
+                if o.status in DRAFT_STATES + [
+                    OrderState.PAYMENT_PENDING.value,
+                    OrderState.WAITING_FOR_PRINT_WINDOW.value,
+                    OrderState.QUEUED.value,
+                ]
+            ]
+            if not cancellable:
+                await whatsapp_service.send_text_message(
+                    to_phone=sender,
+                    text="ℹ️ You have no active orders to cancel. Send a PDF document to start a new order anytime!",
+                )
+                return
+
+            target_order = cancellable[0]
+            await transition_order(session, target_order, OrderState.CANCELLED, actor_type="CUSTOMER", metadata={"reason": "Cancelled by customer via WhatsApp"})
+            await session.commit()
+
+            reply = (
+                f"❌ *Order #{target_order.order_code} (Token: {target_order.pickup_token}) has been cancelled.*\n\n"
+                f"• *Files Discarded:* {len(target_order.files)}\n"
+                f"• *Status:* CANCELLED\n\n"
+                f"✨ You can send a new PDF document right now to start a fresh order!"
+            )
+            await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+            return
+
+        # Subcase C2: Confirmation command
+        elif cmd in ["CONFIRM", "CONFIRM & PAY", "CONFIRM ORDER", "PAY"]:
             if not order or not order.files:
                 await whatsapp_service.send_text_message(
                     to_phone=sender,
@@ -269,12 +360,13 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
 
             reply = (
                 f"🧾 *Order Confirmed!* (Order #{order.order_code})\n\n"
-                f"• *Files:* {len(order.files)}\n"
-                f"• *Total Pages:* {order.total_pages}\n"
+                f"• *Files:* {len(order.files)} files ({order.total_pages} total pages)\n"
                 f"• *Total Amount:* ₹{order.total_amount:.2f}\n"
                 f"• *Pickup Token:* *{order.pickup_token}*\n\n"
-                f"💳 *Payment Pending:* Please pay ₹{order.total_amount:.2f} at the counter using your pickup token *{order.pickup_token}*.\n"
-                f"Once paid, your order will automatically be dispatched to the printer!"
+                f"💳 *Payment Pending:* Please pay ₹{order.total_amount:.2f} using the QR code above or via the Razorpay link.\n"
+                f"⚡ *After paying:* Reply *PAID* or *VERIFY* to auto-release your prints!\n"
+                f"❌ *Want to cancel?* Reply *CANCEL* anytime before printing.\n\n"
+                f"✨ *Need another print job?* You can send another PDF right now to create a separate order instantaneously!"
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
@@ -282,7 +374,7 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await send_payment_qr(sender, order, session=session)
             return
 
-        # Subcase C2: Payment Reverification command
+        # Subcase C3: Payment Reverification command
         elif cmd in ["PAID", "VERIFY", "REVERIFY", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE", "STATUS PAYMENT"]:
             if not order:
                 await whatsapp_service.send_text_message(
@@ -298,7 +390,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"• *Status:* QUEUED FOR PRINTING\n"
                     f"• *Amount Paid:* ₹{order.total_amount:.2f}\n"
                     f"• *Pickup Token:* *{order.pickup_token}*\n\n"
-                    f"🖨️ Your document has been sent to the print queue! Show Token *{order.pickup_token}* at the counter to collect your prints."
+                    f"🖨️ Your document has been sent to the print queue! Show Token *{order.pickup_token}* at the counter to collect your prints.\n\n"
+                    f"✨ *Need more prints?* You can send another PDF right now to place a new order instantaneously!"
                 )
             else:
                 reply = (
@@ -308,26 +401,50 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"• *Pickup Token:* *{order.pickup_token}*\n\n"
                     f"{result.get('message', 'Payment not confirmed yet.')}\n\n"
                     f"👉 If paid at the counter, show Token *{order.pickup_token}* to the shop owner.\n"
-                    f"👉 If paying online, complete via the Razorpay link and reply *VERIFY*."
+                    f"👉 If paying online, complete via the Razorpay link and reply *VERIFY*.\n"
+                    f"👉 Reply *CANCEL* if you wish to cancel this order."
                 )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
             return
 
-        # Subcase C3: Order status check
-        elif cmd in ["STATUS", "TOKEN", "MY ORDER"]:
-            if not order:
+        # Subcase C4: Order status check
+        elif cmd in ["STATUS", "TOKEN", "MY ORDER", "MY ORDERS", "ORDERS"]:
+            active_orders = await get_all_active_user_orders(session, user)
+            if not active_orders:
                 await whatsapp_service.send_text_message(
                     to_phone=sender,
-                    text="ℹ️ You have no active print orders. Send a PDF document to start!",
+                    text="ℹ️ You have no active print orders. Send a PDF document to start an order anytime!",
                 )
                 return
 
+            lines = ["📋 *Your Active Print Orders:*\n"]
+            for idx, o in enumerate(active_orders, 1):
+                lines.append(
+                    f"*{idx}. Order #{o.order_code}*\n"
+                    f"• *Pickup Token:* *{o.pickup_token}*\n"
+                    f"• *Status:* {o.status}\n"
+                    f"• *Files:* {len(o.files)} ({o.total_pages} pages)\n"
+                    f"• *Amount:* ₹{o.total_amount:.2f}\n"
+                )
+            lines.extend([
+                "👉 Reply *PAID* to verify online payments.",
+                "👉 Reply *CANCEL* to cancel an active order.",
+                "👉 Send a new PDF to place another order instantaneously!"
+            ])
+            await whatsapp_service.send_text_message(to_phone=sender, text="\n".join(lines))
+            return
+
+        # Subcase C5: System limits & guidelines
+        elif cmd in ["LIMIT", "LIMITS", "RULES", "HELP", "REORDER", "NEW ORDER", "NEW"]:
             reply = (
-                f"📋 *Order Status* (Order #{order.order_code})\n"
-                f"• *Status:* {order.status}\n"
-                f"• *Pickup Token:* *{order.pickup_token}*\n"
-                f"• *Pages:* {order.total_pages}\n"
-                f"• *Total Amount:* ₹{order.total_amount:.2f}\n"
+                f"ℹ️ *PrintShop System Limits & Quick Guide:*\n\n"
+                f"• *Files per Order:* Up to {settings.MAX_FILES_PER_ORDER} PDF files in a single order\n"
+                f"• *File Size Limit:* Up to {settings.MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB per file\n"
+                f"• *Multiple Orders:* Unlimited! You can have multiple orders in progress simultaneously.\n"
+                f"• *Instant Reordering:* Send a new PDF document immediately after confirming or paying for an order.\n"
+                f"• *Cancellation:* Reply *CANCEL* anytime before printing.\n"
+                f"• *Order Reminder:* Unpaid orders remain held for 20 minutes before cleanup.\n\n"
+                f"📄 Send a PDF document to start printing!"
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
             return
@@ -403,7 +520,9 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"• Document Handling: ₹{base_charge:.2f}\n"
                     f"• Printing ({order.total_pages} pages): ₹{print_charge:.2f}\n"
                     f"• *Total Cost: ₹{order.total_amount:.2f}*\n\n"
-                    f"👉 Reply *CONFIRM* to lock in your order!"
+                    f"👉 Reply *CONFIRM* to lock in your order!\n"
+                    f"👉 Send another PDF to add more files (up to {settings.MAX_FILES_PER_ORDER})\n"
+                    f"👉 Or reply *CANCEL* to cancel this order anytime"
                 )
                 await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
