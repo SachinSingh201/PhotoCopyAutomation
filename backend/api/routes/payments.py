@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.config import settings
 from backend.core.database import get_db
@@ -72,4 +72,41 @@ async def get_order_payment_qr(order_id: str, session: AsyncSession = Depends(ge
 async def check_qr_validity(payload: str = Query(..., min_length=1)):
     """Validates whether a QR code payload or UPI deep link is valid."""
     return validate_qr_payload(payload)
+
+
+@router.post("/youpi/webhook")
+async def youpi_payment_webhook(
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Webhook receiver for self-hosted YouPI-PG UPI gateway.
+    Verifies HMAC signature, transitions order to PAID, and auto-dispatches print job.
+    """
+    import json
+    from backend.services.payments.youpi import (
+        process_youpi_payment_success,
+        verify_youpi_webhook_signature,
+    )
+
+    body_bytes = await request.body()
+    sig = request.headers.get("x-youpi-signature") or request.headers.get("x-signature")
+    if not verify_youpi_webhook_signature(body_bytes, sig):
+        raise HTTPException(status_code=401, detail="Invalid YouPI signature")
+
+    try:
+        payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Malformed JSON payload")
+
+    success, message, order = await process_youpi_payment_success(session, payload)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {
+        "status": "success",
+        "message": message,
+        "order_code": order.order_code if order else None,
+        "pickup_token": order.pickup_token if order else None,
+    }
 

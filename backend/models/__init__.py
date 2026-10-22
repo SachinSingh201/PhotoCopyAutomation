@@ -16,6 +16,7 @@ from backend.models.schedule import (
     ScheduleException,
     PrintServiceControl,
 )
+from backend.models.whatsapp_message import ProcessedWhatsAppMessage
 
 __all__ = [
     "Base",
@@ -40,4 +41,5 @@ __all__ = [
     "PrintingSchedule",
     "ScheduleException",
     "PrintServiceControl",
+    "ProcessedWhatsAppMessage",
 ]

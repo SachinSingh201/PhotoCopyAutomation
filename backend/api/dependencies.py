@@ -23,20 +23,20 @@ async def verify_agent_token(authorization: str = Header(...)) -> str:
 async def verify_admin_secret(
     x_admin_secret: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None),
-    admin_secret: Optional[str] = Query(None),
 ) -> str:
-    """Validate admin authorization token via header, bearer token, or query param."""
+    """
+    Validate admin authorization token via header or bearer token only.
+    Query param removed to prevent secret leakage in logs/history.
+    """
     token = None
     if x_admin_secret:
         token = x_admin_secret
     elif authorization and authorization.startswith("Bearer "):
         token = authorization[7:].strip()
-    elif admin_secret:
-        token = admin_secret
 
     if not token or token != settings.ADMIN_SECRET:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Unauthorized admin access. Provide valid X-Admin-Secret header or Bearer token.",
+            detail="Unauthorized admin access. Provide valid X-Admin-Secret or Bearer token in headers.",
         )
     return token

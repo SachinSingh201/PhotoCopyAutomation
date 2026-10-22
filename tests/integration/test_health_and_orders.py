@@ -27,6 +27,14 @@ async def test_complete_vertical_slice_order_lifecycle(client, valid_pdf_6_pages
     8. Order is marked READY_FOR_PICKUP with pickup token
     9. Admin marks order as collected
     """
+    # Ensure print service is forced open so test runs reliably at any hour of day
+    admin_headers = {"X-Admin-Secret": settings.ADMIN_SECRET}
+    await client.post(
+        "/admin/print-service/start",
+        headers=admin_headers,
+        json={"reason": "Integration test run"},
+    )
+
     # 1. Create order
     create_res = await client.post(
         "/orders",

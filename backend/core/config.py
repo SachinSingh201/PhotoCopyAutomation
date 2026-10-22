@@ -46,11 +46,17 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = "mock_llm_key"
     LLM_MODEL: str = "gemini-1.5-flash"
 
-    # Payment Gateway
-    PAYMENT_PROVIDER: str = "mock"  # "razorpay" | "stripe" | "mock"
+    # Payment Gateway & YouPI-PG
+    PAYMENT_PROVIDER: str = "youpi"  # "youpi" | "razorpay" | "mock"
     PAYMENT_KEY_ID: str = "mock_key_id"
     PAYMENT_KEY_SECRET: str = "mock_key_secret"
     PAYMENT_WEBHOOK_SECRET: str = "mock_webhook_secret"
+
+    # YouPI-PG Self-Hosted UPI Gateway Configuration
+    YOUPI_GATEWAY_URL: str = "http://localhost:6100"
+    YOUPI_API_KEY: str = ""
+    YOUPI_WEBHOOK_SECRET: str = "youpi_webhook_secret_change_me"
+    ORDER_PAYMENT_TIMEOUT_MINUTES: int = 5
 
     # Pricing (in base currency unit, e.g. INR)
     PRICE_FILE_BASE_CHARGE: float = 5.0

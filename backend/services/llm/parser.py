@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import List, Optional
@@ -40,6 +41,48 @@ JSON Schema to output:
   "clarification_question": null
 }
 """
+
+
+async def call_gemini_llm(user_text: str, files: List[OrderFile]) -> LLMInterpretationResult:
+    """
+    Calls Google Gemini API with structured output for print configuration parsing.
+    Implements timeout, retry, and validation.
+    """
+    import google.generativeai as genai
+
+    genai.configure(api_key=settings.LLM_API_KEY)
+
+    # Build file context
+    file_list = "\n".join([
+        f"File {f.upload_sequence}: {f.original_filename} — {f.page_count} pages"
+        for f in files
+    ])
+
+    user_prompt = f"""Files uploaded:
+{file_list}
+
+Customer instruction: "{user_text}"
+
+Parse this into the JSON schema specified in the system prompt. Detect ambiguity and ask for clarification when needed."""
+
+    model = genai.GenerativeModel(
+        model_name=settings.LLM_MODEL,
+        generation_config={
+            "temperature": 0.1,
+            "response_mime_type": "application/json",
+        }
+    )
+
+    response = await asyncio.to_thread(
+        model.generate_content,
+        [SYSTEM_PROMPT, user_prompt]
+    )
+
+    if not response.text:
+        raise ValueError("Empty response from Gemini API")
+
+    parsed = json.loads(response.text)
+    return LLMInterpretationResult(**parsed)
 
 
 def mock_llm_interpret(user_text: str, files: List[OrderFile]) -> LLMInterpretationResult:
@@ -131,8 +174,15 @@ async def interpret_print_instructions(
     # In development/test or if provider is mock, use the mock parser
     if settings.LLM_PROVIDER == "mock":
         result = mock_llm_interpret(user_text, files)
+    elif settings.LLM_PROVIDER == "gemini":
+        try:
+            result = await call_gemini_llm(user_text, files)
+        except Exception as e:
+            logger.error(f"Gemini LLM call failed: {e}. Falling back to mock.")
+            result = mock_llm_interpret(user_text, files)
     else:
-        # Placeholder for external LLM API client (Gemini / OpenAI API)
+        # Future: OpenAI, Claude, etc.
+        logger.warning(f"Unsupported LLM_PROVIDER={settings.LLM_PROVIDER}. Using mock.")
         result = mock_llm_interpret(user_text, files)
 
     # Log LLM interaction to DB

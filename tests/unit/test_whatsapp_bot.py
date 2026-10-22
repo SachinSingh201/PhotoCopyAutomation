@@ -46,21 +46,16 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert order.files[0].page_count == 6
         assert order.total_pages == 6
 
-        # Verify WhatsApp confirmation text was sent with page count and cost estimation
+        # Verify WhatsApp confirmation text was sent with page count
         assert mock_send.call_count == 1
         sent_text = mock_send.call_args[1]["text"]
-        assert "Document Received & Analyzed!" in sent_text
+        assert "File 1 of 10 Received!" in sent_text
         assert "my_notes.pdf" in sent_text
         assert "6 pages" in sent_text
-        assert "Cost Estimation" in sent_text
-        assert "Estimated Total" in sent_text
-        assert order.pickup_token in sent_text
+        assert "DONE" in sent_text
 
-        # Verify QR code image was dispatched
-        assert mock_img.call_count == 1
-        img_caption = mock_img.call_args[1]["caption"]
-        assert "Scan QR to Pay" in img_caption
-        assert order.pickup_token in img_caption
+        # QR code image should NOT be dispatched on initial file upload
+        assert mock_img.call_count == 0
 
         # 2. Customer replies with instructions: "Single side all pages"
         mock_send.reset_mock()
@@ -81,9 +76,10 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert "Print Options Configured" in instruction_reply
         assert "Single" in instruction_reply
         assert "Updated Cost Estimation" in instruction_reply
-        assert mock_img.call_count == 1
+        # QR code should NOT be sent on instructions either
+        assert mock_img.call_count == 0
 
-        # 3. Customer confirms order: "CONFIRM"
+        # 3. Customer confirms all files are sent: "CONFIRM"
         mock_send.reset_mock()
         mock_img.reset_mock()
         confirm_event = {
@@ -94,13 +90,16 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         }
         await handle_inbound_whatsapp_event(db_session, confirm_event)
 
-        # Verify state advanced to PAYMENT_PENDING
+        # Verify state advanced to PAYMENT_PENDING with 5-minute timeout
         order = await get_active_customer_order(db_session, user)
         assert order.status == OrderState.PAYMENT_PENDING.value
+        assert order.expires_at is not None
         assert mock_send.call_count == 1
         confirm_reply = mock_send.call_args[1]["text"]
-        assert "Order Confirmed!" in confirm_reply
+        assert "Order Confirmed & Bill Receipt" in confirm_reply
+        assert "Payment Window: 5 MINUTES" in confirm_reply
         assert order.pickup_token in confirm_reply
+        # QR code image is now dispatched in this single confirmation step
         assert mock_img.call_count == 1
 
         # 4. Customer asks to verify payment: "VERIFY"
@@ -275,4 +274,114 @@ async def test_bot_multiple_files_in_draft_and_instant_reorder(db_session, valid
         limits_reply = mock_send.call_args[1]["text"]
         assert "System Limits & Quick Guide" in limits_reply
         assert "10 PDF files" in limits_reply
-        assert "Instant Reordering" in limits_reply
+        assert "5 minutes" in limits_reply
+
+
+@pytest.mark.asyncio
+async def test_bot_5_minute_unpaid_order_expiration(db_session, valid_pdf_6_pages):
+    """Verifies that unpaid orders exceeding the 5-minute timeout are expired and deleted."""
+    from datetime import datetime, timedelta, timezone
+    from backend.services.orders.service import cleanup_expired_orders
+
+    phone = "919988775566"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # 1. Upload file
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "Expiring Customer",
+            "document": {"id": "doc_exp_1", "filename": "expiring.pdf", "mime_type": "application/pdf"},
+        })
+
+        # 2. Confirm order (moves to PAYMENT_PENDING with 5 min timeout)
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Expiring Customer",
+            "text": "DONE",
+        })
+
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        order = await get_active_customer_order(db_session, user)
+        assert order is not None
+        assert order.status == OrderState.PAYMENT_PENDING.value
+
+        # 3. Simulate passage of 6 minutes (exceeding 5-minute timeout)
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=6)
+        order.expires_at = past_time
+        await db_session.commit()
+
+        # 4. Trigger cleanup
+        mock_send.reset_mock()
+        cleaned = await cleanup_expired_orders(db_session)
+        assert order.order_code in cleaned
+
+        # Verify order transitioned to EXPIRED
+        refreshed = (await db_session.execute(select(Order).where(Order.id == order.id))).scalar_one()
+        assert refreshed.status == OrderState.EXPIRED.value
+
+        # Verify WhatsApp expiration notification was sent
+        assert mock_send.call_count == 1
+        exp_text = mock_send.call_args[1]["text"]
+        assert "Expired & Deleted" in exp_text
+        assert "5-minute payment window" in exp_text
+
+
+@pytest.mark.asyncio
+async def test_youpi_webhook_payment_verification(db_session, valid_pdf_6_pages):
+    """Verifies that YouPI-PG webhook marks order as PAID and enqueues print job."""
+    from backend.services.payments.youpi import process_youpi_payment_success
+
+    phone = "919988778899"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # Upload and confirm order
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "YouPI Customer",
+            "document": {"id": "doc_yp_1", "filename": "youpi_doc.pdf", "mime_type": "application/pdf"},
+        })
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "YouPI Customer",
+            "text": "DONE",
+        })
+
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        order = await get_active_customer_order(db_session, user)
+        assert order.status == OrderState.PAYMENT_PENDING.value
+
+        # Simulate YouPI-PG Webhook call
+        mock_send.reset_mock()
+        webhook_payload = {
+            "event": "payment.success",
+            "order_id": order.order_code,
+            "amount": order.total_amount,
+            "utr": "UTR998877665544",
+            "status": "SUCCESS",
+        }
+        success, message, updated_order = await process_youpi_payment_success(db_session, webhook_payload)
+        assert success is True
+        assert updated_order.status == OrderState.QUEUED.value
+
+        # Verify customer received payment verified notification with pickup token
+        assert mock_send.call_count == 1
+        paid_text = mock_send.call_args[1]["text"]
+        assert "Payment Verified via UPI!" in paid_text
+        assert order.pickup_token in paid_text
+        assert "UTR998877665544" in paid_text

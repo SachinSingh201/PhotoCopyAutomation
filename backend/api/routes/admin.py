@@ -1072,12 +1072,15 @@ async def upload_shop_qr_image(
     session: AsyncSession = Depends(get_db),
 ):
     """Allows shop owner to upload their counter UPI QR code image (PNG/JPG)."""
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Only image files (PNG, JPG, WebP) are allowed")
-
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image must be under 10MB")
+
+    # Verify magic bytes (PNG or JPEG)
+    is_png = content.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpeg = content.startswith(b"\xff\xd8\xff")
+    if not (is_png or is_jpeg):
+        raise HTTPException(status_code=400, detail="Only PNG or JPEG image files allowed")
 
     qr_dest = settings.shop_qr_file
     with open(qr_dest, "wb") as f:

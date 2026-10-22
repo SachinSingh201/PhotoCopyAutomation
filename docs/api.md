@@ -17,6 +17,8 @@
 ## 3. Payments
 - `POST /payments/create`: Initiate payment provider order for a confirmed order.
 - `POST /payments/verify`: Server-side verification of payment proof or direct gateway verification. Transitions order to `PAID` and either `QUEUED` (if open) or `WAITING_FOR_PRINT_WINDOW` (if closed).
+- `POST /payments/youpi/webhook` (and `/api/v1/payments/youpi/webhook`): Webhook endpoint for the self-hosted **YouPI-PG** payment gateway. Validates HMAC-SHA256 signature against `YOUPI_WEBHOOK_SECRET`, transitions order to `PAID`, enqueues print job, and dispatches pickup token to customer on WhatsApp.
+- `GET /payments/validate-qr`: Validates UPI deep link URI and payload compliance.
 
 ## 4. Queue & Print Agent
 - `GET /queue`: Get current active queue items and estimated completion times.

@@ -106,3 +106,50 @@ async def test_admin_payment_endpoints():
         )
         assert qr_val.status_code == 200
         assert qr_val.json()["is_valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_youpi_webhook_http_endpoint(client, db_session, valid_pdf_6_pages):
+    from unittest.mock import AsyncMock, patch
+    from sqlalchemy import select
+    from backend.models.user import User
+    from backend.services.whatsapp.bot import handle_inbound_whatsapp_event, get_active_customer_order
+
+    phone = "919911223344"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "HTTP YouPI Customer",
+            "document": {"id": "doc_yp_http", "filename": "test.pdf", "mime_type": "application/pdf"},
+        })
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "HTTP YouPI Customer",
+            "text": "DONE",
+        })
+
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        order = await get_active_customer_order(db_session, user)
+
+        webhook_body = {
+            "event": "payment.success",
+            "order_id": order.order_code,
+            "amount": order.total_amount,
+            "utr": "UTR_HTTP_TEST_123",
+            "status": "SUCCESS",
+        }
+        res = await client.post("/api/v1/payments/youpi/webhook", json=webhook_body)
+        assert res.status_code == 200, f"Expected 200 but got {res.status_code}: {res.text}"
+        data = res.json()
+        assert data["status"] == "success"
+        assert data["order_code"] == order.order_code
+        assert data["pickup_token"] == order.pickup_token

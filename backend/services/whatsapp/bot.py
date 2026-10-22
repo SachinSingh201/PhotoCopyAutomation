@@ -1,5 +1,6 @@
 import json
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,30 +10,40 @@ from backend.core.logging import logger
 from backend.models.file import OrderFile
 from backend.models.order import Order
 from backend.models.user import ConversationSession, User
+from backend.models.whatsapp_message import ProcessedWhatsAppMessage
 from backend.services.files.service import process_and_save_order_file
 from backend.services.llm.parser import interpret_print_instructions
-from backend.services.orders.service import create_order, get_or_create_user, get_order_by_id
+from backend.services.orders.service import cleanup_expired_orders, create_order, get_or_create_user, get_order_by_id
 from backend.services.orders.state_machine import OrderState, transition_order
 from backend.services.payments.razorpay import create_razorpay_payment_link, reverify_order_payment
 from backend.services.payments.upi import generate_qr_code_url, generate_upi_uri
+from backend.services.payments.youpi import create_youpi_order
 from backend.services.pricing.engine import calculate_order_pricing_snapshot
 from backend.services.whatsapp.service import whatsapp_service
 
 
 async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSession] = None) -> None:
     """
-    Dispatches the shop counter QR code (or local dynamic UPI QR) with the exact payable amount,
-    accompanied by a Razorpay online payment link and verification instructions.
+    Dispatches the shop counter QR code (or local dynamic UPI QR / YouPI checkout) with the exact payable amount.
+    Includes the 5-minute payment expiration warning.
     """
-    rzp_url = None
-    try:
-        rzp_info = await create_razorpay_payment_link(order)
-        if rzp_info:
-            rzp_url = rzp_info.get("short_url")
-    except Exception as e:
-        logger.warning(f"Could not generate Razorpay payment link: {e}")
+    youpi_info = None
+    if settings.PAYMENT_PROVIDER == "youpi":
+        try:
+            youpi_info = await create_youpi_order(order)
+        except Exception as ye:
+            logger.warning(f"Could not initialize YouPI payment order: {ye}")
 
-    # Build clear caption detailing payable amount and tokens
+    rzp_url = None
+    if settings.PAYMENT_PROVIDER == "razorpay":
+        try:
+            rzp_info = await create_razorpay_payment_link(order)
+            if rzp_info:
+                rzp_url = rzp_info.get("short_url")
+        except Exception as e:
+            logger.warning(f"Could not generate Razorpay payment link: {e}")
+
+    # Build clear caption detailing payable amount, 5-minute timeout, and tokens
     caption_lines = [
         f"💳 *Scan QR to Pay: ₹{order.total_amount:.2f}*",
         f"• *Shop:* {settings.SHOP_NAME}",
@@ -40,16 +51,23 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         f"• *Order Code:* #{order.order_code}",
         f"• *Pickup Token:* *{order.pickup_token}*",
         f"• *Total Payable:* *₹{order.total_amount:.2f}*",
+        f"⏱️ *Payment Window: 5 minutes* (Order will be deleted if unpaid)",
     ]
-    if rzp_url:
+    if youpi_info and youpi_info.get("payment_url"):
         caption_lines.extend([
             "",
-            f"🌐 *Or Pay via Razorpay (UPI / Cards / NetBanking):*",
+            f"⚡ *Pay via YouPI Checkout:*",
+            f"{youpi_info['payment_url']}",
+        ])
+    elif rzp_url:
+        caption_lines.extend([
+            "",
+            f"🌐 *Or Pay via Razorpay:*",
             f"{rzp_url}",
         ])
     caption_lines.extend([
         "",
-        "⚡ *After paying:* Reply *PAID* or *VERIFY* to auto-check payment and release your print job!",
+        "⚡ *After paying:* Reply *PAID* or *VERIFY* (or wait for auto-confirmation via YouPI-PG)!",
     ])
     caption = "\n".join(caption_lines)
 
@@ -60,7 +78,7 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
     else:
         try:
             import qrcode
-            upi_uri = generate_upi_uri(
+            upi_uri = (youpi_info.get("upi_uri") if youpi_info else None) or generate_upi_uri(
                 upi_id=settings.SHOP_UPI_ID,
                 payee_name=settings.SHOP_NAME,
                 amount=order.total_amount,
@@ -95,8 +113,11 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
         f"• *Shop UPI ID:* `{settings.SHOP_UPI_ID}`\n"
         f"• *Pickup Token:* *{order.pickup_token}*\n"
+        f"⏱️ *Payment Window: 5 minutes* (Order will be deleted if unpaid)\n"
     )
-    if rzp_url:
+    if youpi_info and youpi_info.get("payment_url"):
+        fallback_text += f"\n⚡ *Pay Online via YouPI:*\n{youpi_info['payment_url']}\n"
+    elif rzp_url:
         fallback_text += f"\n🌐 *Pay Online via Razorpay:*\n{rzp_url}\n"
     fallback_text += "\n👉 Show token at counter or reply *PAID* / *VERIFY* once completed!"
     await whatsapp_service.send_text_message(to_phone=sender, text=fallback_text)
@@ -183,8 +204,35 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         logger.warning(f"Inbound WhatsApp event without sender: {event}")
         return
 
+    # Webhook idempotency: prevent duplicate processing of same message
+    message_id = event.get("message_id")
+    provider = event.get("provider", "unknown")
+    if message_id:
+        check_query = select(ProcessedWhatsAppMessage).where(
+            ProcessedWhatsAppMessage.message_id == message_id,
+            ProcessedWhatsAppMessage.sender == sender
+        )
+        existing = await session.execute(check_query)
+        if existing.scalar_one_or_none():
+            logger.info(f"Skipping duplicate WhatsApp message {message_id} from {sender}")
+            return
+
+        # Mark message as processed immediately
+        processed_msg = ProcessedWhatsAppMessage(
+            message_id=message_id,
+            sender=sender,
+            provider=provider,
+            event_type=event.get("type", "unknown"),
+            processed_at=datetime.now(timezone.utc)
+        )
+        session.add(processed_msg)
+        await session.flush()
+
     display_name = event.get("display_name") or "Customer"
     event_type = event.get("type", "text")
+
+    # 0. Clean up any unpaid orders that have exceeded the 5-minute payment window
+    await cleanup_expired_orders(session)
 
     # 1. Get or create Customer User
     user = await get_or_create_user(
@@ -218,7 +266,7 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 to_phone=sender,
                 text=(
                     f"⚠️ *File Limit Reached:* Order #{order.order_code} already contains {settings.MAX_FILES_PER_ORDER} files (maximum limit per order).\n\n"
-                    f"👉 Reply *CONFIRM* to lock in your order with these files.\n"
+                    f"👉 Reply *DONE* (or *CONFIRM*) to lock in your order with these files.\n"
                     f"👉 Or reply *CANCEL* to cancel this order and start over."
                 ),
             )
@@ -258,29 +306,16 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         # Reload order to reflect fresh state
         order = await get_order_by_id(session, order.id)
 
-        base_charge = len(order.files) * settings.PRICE_FILE_BASE_CHARGE
-        print_charge = max(0.0, order.total_amount - base_charge)
-
+        # Concise file confirmation - DO NOT send QR code or invoice for every file!
         reply = (
-            f"📄 *Document Received & Analyzed!* (File {len(order.files)} of {settings.MAX_FILES_PER_ORDER})\n"
+            f"📄 *File {len(order.files)} of {settings.MAX_FILES_PER_ORDER} Received!*\n"
             f"• *File:* {order_file.original_filename} ({order_file.page_count} pages)\n"
-            f"• *Total in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n"
-            f"• *Order Code:* #{order.order_code}\n"
-            f"• *Pickup Token:* *{order.pickup_token}*\n\n"
-            f"💰 *Cost Estimation (Standard Single-Sided B&W):*\n"
-            f"• Document Handling: ₹{base_charge:.2f}\n"
-            f"• Print Charge ({order.total_pages} pages @ ₹{settings.PRICE_BW_SINGLE:.2f}/page): ₹{print_charge:.2f}\n"
-            f"• *Estimated Total: ₹{order.total_amount:.2f}*\n\n"
-            f"💬 *What to do next:*\n"
-            f"• Send another PDF to add more files to this order (up to {settings.MAX_FILES_PER_ORDER})\n"
-            f"• Reply with custom print instructions: e.g. *\"Double sided\"*, *\"Color front page\"*\n"
-            f"• Reply *CONFIRM* to lock in your order with this price\n"
-            f"• Or reply *CANCEL* to cancel this order anytime"
+            f"• *Files in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n\n"
+            f"👉 Send another PDF to add more files to this order (up to {settings.MAX_FILES_PER_ORDER}).\n"
+            f"👉 Reply *DONE* (or *CONFIRM*) once you have sent all your files to get the final bill & payment QR!\n"
+            f"👉 Or reply *CANCEL* to discard this order."
         )
         await whatsapp_service.send_text_message(to_phone=sender, text=reply)
-
-        # Dispatch dynamic payment QR code with exact cost
-        await send_payment_qr(sender, order, session=session)
         return
 
     # --------------------------------------------------------------------------
@@ -331,8 +366,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
             return
 
-        # Subcase C2: Confirmation command
-        elif cmd in ["CONFIRM", "CONFIRM & PAY", "CONFIRM ORDER", "PAY"]:
+        # Subcase C2: Confirmation command (User confirms all files are sent)
+        elif cmd in ["DONE", "FINISHED", "CONFIRM", "CONFIRM & PAY", "CONFIRM ORDER", "PAY", "ALL DONE", "ALL FILES SENT", "READY"]:
             if not order or not order.files:
                 await whatsapp_service.send_text_message(
                     to_phone=sender,
@@ -355,22 +390,36 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             if order.status == OrderState.AWAITING_CONFIRMATION.value:
                 await transition_order(session, order, OrderState.PAYMENT_PENDING, actor_type="CUSTOMER")
 
+            # Set 5-minute payment expiration
+            now = datetime.now(timezone.utc)
+            order.expires_at = now + timedelta(minutes=settings.ORDER_PAYMENT_TIMEOUT_MINUTES)
             await calculate_order_pricing_snapshot(session, order)
             await session.commit()
 
+            # Build single comprehensive bill receipt
+            file_count = len(order.files)
+            files_breakdown = "\n".join([f"  {idx}. {f.original_filename} ({f.page_count} pages)" for idx, f in enumerate(order.files, 1)])
+            base_charge = file_count * settings.PRICE_FILE_BASE_CHARGE
+            print_charge = max(0.0, order.total_amount - base_charge)
+            expiry_str = (now + timedelta(minutes=settings.ORDER_PAYMENT_TIMEOUT_MINUTES)).strftime("%I:%M %p")
+
             reply = (
-                f"🧾 *Order Confirmed!* (Order #{order.order_code})\n\n"
-                f"• *Files:* {len(order.files)} files ({order.total_pages} total pages)\n"
-                f"• *Total Amount:* ₹{order.total_amount:.2f}\n"
-                f"• *Pickup Token:* *{order.pickup_token}*\n\n"
-                f"💳 *Payment Pending:* Please pay ₹{order.total_amount:.2f} using the QR code above or via the Razorpay link.\n"
-                f"⚡ *After paying:* Reply *PAID* or *VERIFY* to auto-release your prints!\n"
-                f"❌ *Want to cancel?* Reply *CANCEL* anytime before printing.\n\n"
-                f"✨ *Need another print job?* You can send another PDF right now to create a separate order instantaneously!"
+                f"🧾 *Order Confirmed & Bill Receipt* (Order #{order.order_code})\n\n"
+                f"• *Pickup Token:* *{order.pickup_token}*\n"
+                f"• *Files Confirmed ({file_count} total):*\n{files_breakdown}\n\n"
+                f"• *Total Pages:* {order.total_pages} pages\n"
+                f"• *Document Handling:* ₹{base_charge:.2f}\n"
+                f"• *Print Charge:* ₹{print_charge:.2f}\n"
+                f"• *Total Amount:* *₹{order.total_amount:.2f}*\n\n"
+                f"⏳ *Payment Window: 5 MINUTES* (Expires at {expiry_str})\n"
+                f"⚠️ *Important:* If payment is not completed within 5 minutes, this order and its uploaded files will be permanently deleted!\n\n"
+                f"💳 Please scan the QR code below or pay via UPI.\n"
+                f"⚡ After paying, reply *PAID* or *VERIFY* (or wait for auto-confirmation via YouPI-PG)!\n"
+                f"❌ Reply *CANCEL* to cancel this order anytime."
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
-            # Dispatch dynamic payment QR code with exact cost
+            # Dispatch dynamic payment QR code in single flow with receipt
             await send_payment_qr(sender, order, session=session)
             return
 
@@ -440,10 +489,11 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 f"ℹ️ *PrintShop System Limits & Quick Guide:*\n\n"
                 f"• *Files per Order:* Up to {settings.MAX_FILES_PER_ORDER} PDF files in a single order\n"
                 f"• *File Size Limit:* Up to {settings.MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB per file\n"
-                f"• *Multiple Orders:* Unlimited! You can have multiple orders in progress simultaneously.\n"
-                f"• *Instant Reordering:* Send a new PDF document immediately after confirming or paying for an order.\n"
-                f"• *Cancellation:* Reply *CANCEL* anytime before printing.\n"
-                f"• *Order Reminder:* Unpaid orders remain held for 20 minutes before cleanup.\n\n"
+                f"• *Single Receipt Flow:* Upload all your files quietly, then reply *DONE* to receive your final receipt and payment QR in a single step\n"
+                f"• *Payment Window:* 5 minutes (unpaid orders and uploaded files are automatically deleted after 5 minutes)\n"
+                f"• *Multiple Orders:* Unlimited! You can run multiple orders simultaneously\n"
+                f"• *Instant Reordering:* Send a new PDF document immediately after confirming or paying for an order\n"
+                f"• *Cancellation:* Reply *CANCEL* anytime before printing\n\n"
                 f"📄 Send a PDF document to start printing!"
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
@@ -520,11 +570,9 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"• Document Handling: ₹{base_charge:.2f}\n"
                     f"• Printing ({order.total_pages} pages): ₹{print_charge:.2f}\n"
                     f"• *Total Cost: ₹{order.total_amount:.2f}*\n\n"
-                    f"👉 Reply *CONFIRM* to lock in your order!\n"
                     f"👉 Send another PDF to add more files (up to {settings.MAX_FILES_PER_ORDER})\n"
+                    f"👉 Reply *DONE* (or *CONFIRM*) once you have sent all your files to get your payment QR!\n"
                     f"👉 Or reply *CANCEL* to cancel this order anytime"
                 )
                 await whatsapp_service.send_text_message(to_phone=sender, text=reply)
-
-                # Dispatch dynamic payment QR code with exact cost
-                await send_payment_qr(sender, order, session=session)
+                return

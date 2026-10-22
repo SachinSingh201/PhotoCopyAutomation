@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,9 +13,23 @@ from backend.core.exceptions import AppException
 from backend.core.logging import logger
 # Ensure all models are imported so Base metadata is complete
 import backend.models
+from backend.services.orders.service import cleanup_expired_orders
 from backend.services.scheduling.service import seed_default_schedule_if_empty
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+async def periodic_order_cleanup_worker():
+    """Background worker to automatically cancel and delete files for unpaid orders exceeding the 5-minute timeout."""
+    while True:
+        try:
+            await asyncio.sleep(30)
+            async with AsyncSessionLocal() as session:
+                await cleanup_expired_orders(session)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Error in periodic order cleanup worker: {e}")
 
 
 @asynccontextmanager
@@ -28,7 +43,17 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await seed_default_schedule_if_empty(session)
 
+    # Start 5-minute unpaid order cleanup task
+    cleanup_task = asyncio.create_task(periodic_order_cleanup_worker())
+
     yield
+
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
     logger.info("Shutting down application...")
     await async_engine.dispose()
 
@@ -41,11 +66,15 @@ app = FastAPI(
 )
 
 # CORS Middleware
+allowed_origins = ["*"] if settings.ENVIRONMENT == "development" else [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -87,11 +116,17 @@ async def root_redirect():
 
 # Include Routers under standard prefixes and /api/v1
 app.include_router(health.router)
+app.include_router(health.router, prefix="/api/v1")
 app.include_router(whatsapp.router)
+app.include_router(whatsapp.router, prefix="/api/v1")
 app.include_router(orders.router)
+app.include_router(orders.router, prefix="/api/v1")
 app.include_router(payments.router)
+app.include_router(payments.router, prefix="/api/v1")
 app.include_router(queue.router)
+app.include_router(queue.router, prefix="/api/v1")
 app.include_router(agent.router)
+app.include_router(agent.router, prefix="/api/v1")
 
 # Admin router under /admin and /api/v1/admin
 app.include_router(admin.router)
