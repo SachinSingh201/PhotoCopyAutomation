@@ -1,7 +1,8 @@
 import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -55,6 +56,7 @@ from backend.schemas.admin import (
 from backend.schemas.orders import OrderRead
 from backend.services.orders.service import get_order_by_id
 from backend.services.orders.state_machine import OrderState, transition_order
+from backend.services.payments.razorpay import reverify_order_payment
 from backend.services.payments.service import verify_payment_and_enqueue
 from backend.services.payments.upi import (
     generate_qr_code_url,
@@ -1023,6 +1025,7 @@ async def get_payment_settings():
         currency=settings.CURRENCY,
         is_valid_upi=v["valid"],
         validation_message=v["message"],
+        has_custom_qr=settings.shop_qr_file.exists(),
     )
 
 
@@ -1059,7 +1062,81 @@ async def update_payment_settings(
         currency=settings.CURRENCY,
         is_valid_upi=True,
         validation_message="UPI ID configured successfully and is valid.",
+        has_custom_qr=settings.shop_qr_file.exists(),
     )
+
+
+@router.post("/payments/qr-upload")
+async def upload_shop_qr_image(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_db),
+):
+    """Allows shop owner to upload their counter UPI QR code image (PNG/JPG)."""
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files (PNG, JPG, WebP) are allowed")
+
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image must be under 10MB")
+
+    qr_dest = settings.shop_qr_file
+    with open(qr_dest, "wb") as f:
+        f.write(content)
+
+    session.add(
+        AuditLog(
+            event_type="SHOP_QR_IMAGE_UPLOADED",
+            actor_type="ADMIN",
+            actor_id="ADMIN",
+            metadata_json=json.dumps({"filename": file.filename, "size_bytes": len(content)}),
+        )
+    )
+    await session.commit()
+
+    return {
+        "status": "success",
+        "message": "Shop counter QR code image uploaded successfully!",
+        "has_custom_qr": True,
+    }
+
+
+@router.get("/payments/qr-image")
+async def get_shop_qr_image():
+    """Returns the uploaded shop QR image, or a fallback dynamic QR code."""
+    qr_dest = settings.shop_qr_file
+    if qr_dest.exists():
+        return FileResponse(qr_dest, media_type="image/png")
+
+    # Fallback to dynamic QR
+    uri = generate_upi_uri(
+        upi_id=settings.SHOP_UPI_ID,
+        payee_name=settings.SHOP_NAME,
+        amount=15.0,
+        order_code="COUNTER",
+        pickup_token="SHOP-01",
+    )
+    qr_url = generate_qr_code_url(uri, size=350)
+    return RedirectResponse(qr_url)
+
+
+@router.delete("/payments/qr-image")
+async def delete_shop_qr_image(session: AsyncSession = Depends(get_db)):
+    """Deletes the custom uploaded shop QR image to revert to dynamic QR generation."""
+    qr_dest = settings.shop_qr_file
+    if qr_dest.exists():
+        qr_dest.unlink()
+    return {"status": "success", "message": "Custom QR removed. Reverted to dynamic QR.", "has_custom_qr": False}
+
+
+@router.post("/payments/{order_id}/reverify")
+async def reverify_order_payment_endpoint(
+    order_id: str,
+    session: AsyncSession = Depends(get_db),
+):
+    """Reverifies an order's payment status against Razorpay and internal gateway."""
+    order = await get_order_by_id(session, order_id)
+    res = await reverify_order_payment(session, order)
+    return res
 
 
 @router.get("/payments/validate-qr", response_model=QRValidationResponse)

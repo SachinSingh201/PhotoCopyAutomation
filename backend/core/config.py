@@ -81,5 +81,9 @@ class Settings(BaseSettings):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    @property
+    def shop_qr_file(self) -> Path:
+        return self.storage_path / "shop_qr.png"
+
 
 settings = Settings()

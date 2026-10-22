@@ -15,10 +15,12 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
 
     with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
          patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img, \
          patch("backend.services.whatsapp.bot.whatsapp_service.send_document", new_callable=AsyncMock) as mock_doc:
 
         mock_dl.return_value = valid_pdf_6_pages
         mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
         mock_doc.return_value = {"status": "success"}
 
         # 1. Customer sends document PDF
@@ -55,12 +57,14 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert order.pickup_token in sent_text
 
         # Verify QR code image was dispatched
-        assert mock_doc.call_count == 1
-        assert "payment_qr" in mock_doc.call_args[1]["filename"]
+        assert mock_img.call_count == 1
+        img_caption = mock_img.call_args[1]["caption"]
+        assert "Scan QR to Pay" in img_caption
+        assert order.pickup_token in img_caption
 
         # 2. Customer replies with instructions: "Single side all pages"
         mock_send.reset_mock()
-        mock_doc.reset_mock()
+        mock_img.reset_mock()
         text_event = {
             "type": "text",
             "sender": phone,
@@ -77,11 +81,11 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert "Print Options Configured" in instruction_reply
         assert "Single" in instruction_reply
         assert "Updated Cost Estimation" in instruction_reply
-        assert mock_doc.call_count == 1
+        assert mock_img.call_count == 1
 
         # 3. Customer confirms order: "CONFIRM"
         mock_send.reset_mock()
-        mock_doc.reset_mock()
+        mock_img.reset_mock()
         confirm_event = {
             "type": "text",
             "sender": phone,
@@ -97,4 +101,18 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         confirm_reply = mock_send.call_args[1]["text"]
         assert "Order Confirmed!" in confirm_reply
         assert order.pickup_token in confirm_reply
-        assert mock_doc.call_count == 1
+        assert mock_img.call_count == 1
+
+        # 4. Customer asks to verify payment: "VERIFY"
+        mock_send.reset_mock()
+        mock_img.reset_mock()
+        verify_event = {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Test Customer",
+            "text": "VERIFY",
+        }
+        await handle_inbound_whatsapp_event(db_session, verify_event)
+        assert mock_send.call_count == 1
+        verify_reply = mock_send.call_args[1]["text"]
+        assert "Payment Verification Update" in verify_reply or "Payment Confirmed!" in verify_reply

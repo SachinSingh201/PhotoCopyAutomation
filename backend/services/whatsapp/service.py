@@ -120,6 +120,13 @@ class MetaCloudAdapter:
         logger.info(f"[Meta WhatsApp Outbound Document to {clean_phone}]: {filename} ({file_path_or_url})")
         return {"status": "success", "provider": "meta", "to": clean_phone, "filename": filename}
 
+    async def send_image(
+        self, to_phone: str, file_path_or_url: str, caption: str = ""
+    ) -> Dict[str, Any]:
+        clean_phone = re.sub(r"[^\d]", "", to_phone)
+        logger.info(f"[Meta WhatsApp Outbound Image to {clean_phone}]: {file_path_or_url}")
+        return {"status": "success", "provider": "meta", "to": clean_phone, "url": file_path_or_url}
+
     async def download_media(self, media_info: Dict[str, Any]) -> bytes:
         media_id = media_info.get("id")
         if not media_id or media_id.startswith("mock_"):
@@ -195,8 +202,13 @@ class OpenWAAdapter:
         return events
 
     def _parse_single_openwa_message(self, data: Dict[str, Any], session_name: str) -> Optional[Dict[str, Any]]:
-        raw_from = data.get("from") or data.get("chatId") or data.get("senderPhone") or ""
-        sender_phone = data.get("senderPhone") or self._extract_clean_phone(raw_from)
+        raw_from = str(data.get("from") or data.get("chatId") or data.get("senderPhone") or "").strip()
+        # If it is a Linked Device JID (e.g. 157814563565577@lid), preserve it verbatim.
+        # Otherwise for standard phone numbers (e.g. 919876543210@c.us), extract the clean digits.
+        if raw_from.endswith("@lid"):
+            sender_phone = raw_from
+        else:
+            sender_phone = data.get("senderPhone") or self._extract_clean_phone(raw_from) or raw_from
         if not sender_phone:
             return None
 
@@ -356,12 +368,66 @@ class OpenWAAdapter:
 
         return {"status": "success", "provider": "openwa", "chatId": chat_id, "filename": filename, "mock": True}
 
+    async def send_image(
+        self, to_phone: str, file_path_or_url: str, caption: str = ""
+    ) -> Dict[str, Any]:
+        """Sends an image using OpenWA endpoint: POST /api/sessions/{sessionId}/messages/send-image."""
+        chat_id = self._format_chat_id(to_phone)
+        session_id = await self._resolve_session_id()
+        url = f"{self.base_url}/api/sessions/{session_id}/messages/send-image"
+        headers = self._get_headers()
+        payload = {
+            "chatId": chat_id,
+            "caption": caption,
+        }
+        if file_path_or_url.startswith("http://") or file_path_or_url.startswith("https://"):
+            payload["url"] = file_path_or_url
+        else:
+            try:
+                with open(file_path_or_url, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                payload["base64"] = b64
+                payload["mimetype"] = "image/png"
+            except Exception as e:
+                logger.warning(f"Could not read local image {file_path_or_url} for base64: {e}")
+                payload["url"] = file_path_or_url
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(url, headers=headers, json=payload)
+                if res.status_code in [200, 201]:
+                    logger.info(f"[OpenWA send-image to {chat_id} SUCCESS]")
+                    return {"status": "success", "provider": "openwa", "chatId": chat_id, "data": res.json()}
+                else:
+                    logger.warning(f"[OpenWA send-image returned {res.status_code}]: {res.text}")
+        except Exception as e:
+            logger.warning(f"OpenWA image send error: {e}")
+
+        return {"status": "success", "provider": "openwa", "chatId": chat_id, "mock": True}
+
     async def download_media(self, media_info: Dict[str, Any]) -> bytes:
         """Downloads document media from OpenWA (inline base64 or stored media endpoint)."""
-        # If base64 is already supplied inline in webhook payload
-        if media_info.get("base64"):
-            return base64.b64decode(media_info["base64"])
+        # 1. Check for inline base64 data (string or dict)
+        b64_val = media_info.get("base64")
+        if isinstance(b64_val, dict):
+            b64_val = b64_val.get("data") or b64_val.get("base64")
+        if not b64_val and media_info.get("media"):
+            m = media_info.get("media")
+            if isinstance(m, dict):
+                b64_val = m.get("data") or m.get("base64")
+            elif isinstance(m, str):
+                b64_val = m
 
+        if isinstance(b64_val, str) and b64_val.strip():
+            clean_b64 = b64_val.strip()
+            if "," in clean_b64:
+                clean_b64 = clean_b64.split(",", 1)[1]
+            try:
+                return base64.b64decode(clean_b64)
+            except Exception as e:
+                logger.warning(f"Error decoding inline base64 media: {e}")
+
+        # 2. Try stored media endpoint from OpenWA
         media_url = media_info.get("media_url")
         if not media_url and media_info.get("id"):
             session_id = await self._resolve_session_id()
@@ -485,6 +551,12 @@ class WhatsAppService:
     ) -> Dict[str, Any]:
         """Dispatches an outbound document/PDF via the active adapter."""
         return await self.active_adapter.send_document(to_phone, file_path_or_url, filename, caption)
+
+    async def send_image(
+        self, to_phone: str, file_path_or_url: str, caption: str = ""
+    ) -> Dict[str, Any]:
+        """Dispatches an outbound image/photo via the active adapter."""
+        return await self.active_adapter.send_image(to_phone, file_path_or_url, caption)
 
     async def download_media(self, media_info: Dict[str, Any]) -> bytes:
         """Downloads document media using the active provider or media info details."""

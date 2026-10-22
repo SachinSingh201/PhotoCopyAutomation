@@ -970,7 +970,10 @@ async function lookupPaymentOrder() {
                             ${payable ? '✓ Verify & Print' : '✓ Re-Verify Payment'}
                         </button>
                     </div>
-                    <span style="font-size:0.75rem; color:var(--text-muted);">Confirms UPI payment and queues print job</span>
+                    <button class="btn btn-secondary btn-sm" onclick="reverifyRazorpayPayment('${res.order_id}')" style="font-size:0.75rem; padding:4px 10px;">
+                        ⚡ Auto-Reverify Online (Razorpay)
+                    </button>
+                    <span style="font-size:0.75rem; color:var(--text-muted);">Confirms UPI / Razorpay payment and queues print job</span>
                 </div>
             </div>
         `;
@@ -1022,6 +1025,8 @@ async function quickVerifyOrder(orderId, token, amount) {
     } catch (err) {}
 }
 
+let currentHasCustomQR = false;
+
 async function fetchPaymentSettings() {
     try {
         const res = await apiRequest('/payments/settings');
@@ -1030,6 +1035,7 @@ async function fetchPaymentSettings() {
         if (upiInput) upiInput.value = res.shop_upi_id;
         if (nameInput) nameInput.value = res.shop_name;
 
+        currentHasCustomQR = !!res.has_custom_qr;
         updateTestQRPreview(res.shop_upi_id, res.shop_name);
     } catch (err) {}
 }
@@ -1040,14 +1046,14 @@ function updateTestQRPreview(customUpi, customName) {
     const amount = parseFloat(document.getElementById('test-qr-amount')?.value || '15') || 15;
 
     const uri = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payeeName)}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent('Test Transaction')}`;
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=${encodeURIComponent(uri)}`;
+    const dynamicQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=${encodeURIComponent(uri)}`;
 
     const img = document.getElementById('test-qr-img');
     const uriText = document.getElementById('test-qr-uri');
     const badge = document.getElementById('test-qr-validity-badge');
-
-    if (img) img.src = qrUrl;
-    if (uriText) uriText.textContent = uri;
+    const customBadge = document.getElementById('shop-qr-custom-badge');
+    const deleteBtn = document.getElementById('btn-delete-shop-qr');
+    const previewTitle = document.getElementById('preview-qr-title');
 
     const isValid = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z0-9.\-_]{2,64}$/.test(upiId);
     const feedback = document.getElementById('upi-vpa-feedback');
@@ -1055,9 +1061,33 @@ function updateTestQRPreview(customUpi, customName) {
         feedback.textContent = isValid ? "✓ Valid UPI handle format" : "⚠ Must be in format handle@bank (e.g. name@okhdfcbank)";
         feedback.style.color = isValid ? "var(--accent-emerald)" : "var(--accent-coral)";
     }
-    if (badge) {
-        badge.textContent = isValid ? "Valid NPCI UPI Format ✅" : "Invalid UPI VPA ❌";
-        badge.className = `status-tag ${isValid ? 'tag-verified' : 'tag-failed'}`;
+
+    if (currentHasCustomQR) {
+        if (img) img.src = `/api/v1/admin/payments/qr-image?t=${Date.now()}`;
+        if (uriText) uriText.textContent = "Custom Physical Standee Active (Dispatched to customer WhatsApp)";
+        if (badge) {
+            badge.textContent = "Custom Shop Standee Active ✅";
+            badge.className = "status-tag tag-verified";
+        }
+        if (customBadge) {
+            customBadge.textContent = "Custom QR Active ✅";
+            customBadge.className = "status-tag tag-verified";
+        }
+        if (deleteBtn) deleteBtn.style.display = 'inline-block';
+        if (previewTitle) previewTitle.textContent = "Live Counter QR Standee Dispatched to Customers";
+    } else {
+        if (img) img.src = dynamicQrUrl;
+        if (uriText) uriText.textContent = uri;
+        if (badge) {
+            badge.textContent = isValid ? "Valid NPCI UPI Format ✅" : "Invalid UPI VPA ❌";
+            badge.className = `status-tag ${isValid ? 'tag-verified' : 'tag-failed'}`;
+        }
+        if (customBadge) {
+            customBadge.textContent = "Dynamic QR Mode";
+            customBadge.className = "status-tag tag-ready";
+        }
+        if (deleteBtn) deleteBtn.style.display = 'none';
+        if (previewTitle) previewTitle.textContent = "Live Dynamic Payment QR Preview";
     }
 }
 
@@ -1108,6 +1138,72 @@ function resetDefaultUPI() {
     if (upiInput) upiInput.value = 'printshop@upi';
     if (nameInput) nameInput.value = 'Print Express Hub';
     updateTestQRPreview('printshop@upi', 'Print Express Hub');
+}
+
+async function uploadShopQRImage() {
+    const fileInput = document.getElementById('shop-qr-file-input');
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+        showToast("Please choose an image file (PNG/JPG/WebP) first", "warning");
+        return;
+    }
+    const file = fileInput.files[0];
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+        const res = await fetch('/api/v1/admin/payments/qr-upload', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || "Shop counter QR code uploaded successfully!", "success");
+            fileInput.value = '';
+            fetchPaymentSettings();
+        } else {
+            showToast(data.detail || "Upload failed", "error");
+        }
+    } catch (err) {
+        showToast("Upload failed: " + err.message, "error");
+    }
+}
+
+async function deleteShopQRImage() {
+    if (!confirm("Remove the custom counter QR image and revert to dynamic QR generation?")) return;
+    try {
+        const res = await fetch('/api/v1/admin/payments/qr-image', {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (res.ok) {
+            showToast(data.message || "Custom QR removed.", "success");
+            fetchPaymentSettings();
+        } else {
+            showToast(data.detail || "Delete failed", "error");
+        }
+    } catch (err) {
+        showToast("Delete failed: " + err.message, "error");
+    }
+}
+
+async function reverifyRazorpayPayment(orderId) {
+    try {
+        showToast("Checking payment verification status with Razorpay...", "info");
+        const res = await apiRequest(`/payments/${orderId}/reverify`, {
+            method: 'POST'
+        });
+        if (res.verified) {
+            showToast(res.message || "Payment verified successfully!", "success");
+            fetchOrdersData();
+            fetchQueueData();
+            fetchDashboardData();
+            openOrderDetail(orderId);
+        } else {
+            showToast(res.message || "Payment not detected yet.", "warning");
+        }
+    } catch (err) {
+        showToast("Reverification error: " + err.message, "error");
+    }
 }
 
 // 11. Service Controls

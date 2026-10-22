@@ -158,3 +158,55 @@ async def test_admin_reports_and_settings(client: AsyncClient, admin_headers):
     )
     assert update_res.status_code == 200
     assert update_res.json()["settings"]["shop_name"] == "QuickPrint Express"
+
+
+@pytest.mark.asyncio
+async def test_admin_shop_qr_upload_and_delete(client: AsyncClient, admin_headers):
+    # 1. Check initial payment settings has_custom_qr
+    pay_res = await client.get("/admin/payments/settings", headers=admin_headers)
+    assert pay_res.status_code == 200
+    assert "has_custom_qr" in pay_res.json()
+
+    # 2. Upload a custom QR image
+    dummy_png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+    upload_res = await client.post(
+        "/admin/payments/qr-upload",
+        headers=admin_headers,
+        files={"file": ("my_counter_qr.png", dummy_png, "image/png")},
+    )
+    assert upload_res.status_code == 200
+    assert upload_res.json()["has_custom_qr"] is True
+
+    # 3. GET /admin/payments/qr-image should now return the image
+    img_res = await client.get("/admin/payments/qr-image", headers=admin_headers)
+    assert img_res.status_code == 200
+    assert img_res.headers["content-type"].startswith("image/")
+
+    # 4. DELETE /admin/payments/qr-image should delete and revert
+    del_res = await client.delete("/admin/payments/qr-image", headers=admin_headers)
+    assert del_res.status_code == 200
+    assert del_res.json()["has_custom_qr"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_payment_reverify_endpoint(client: AsyncClient, db_session, admin_headers):
+    user = User(whatsapp_user_id="wa_reverify_user", phone_number="+919876540099", display_name="Reverify User")
+    db_session.add(user)
+    await db_session.flush()
+
+    order = Order(
+        order_code="ORD-REVERIFY-1",
+        pickup_token="RV-01",
+        user_id=user.id,
+        status="PAYMENT_PENDING",
+        total_pages=2,
+        total_amount=10.0,
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    res = await client.post(f"/admin/payments/{order.id}/reverify", headers=admin_headers)
+    assert res.status_code == 200
+    data = res.json()
+    assert "verified" in data
+    assert data["pickup_token"] == "RV-01"

@@ -13,35 +13,93 @@ from backend.services.files.service import process_and_save_order_file
 from backend.services.llm.parser import interpret_print_instructions
 from backend.services.orders.service import create_order, get_or_create_user, get_order_by_id
 from backend.services.orders.state_machine import OrderState, transition_order
+from backend.services.payments.razorpay import create_razorpay_payment_link, reverify_order_payment
 from backend.services.payments.upi import generate_qr_code_url, generate_upi_uri
 from backend.services.pricing.engine import calculate_order_pricing_snapshot
 from backend.services.whatsapp.service import whatsapp_service
 
 
-async def send_payment_qr(sender: str, order: Order) -> None:
-    """Dispatches a dynamic NPCI-compliant UPI QR code prefilled with total costing and pickup token."""
+async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSession] = None) -> None:
+    """
+    Dispatches the shop counter QR code (or local dynamic UPI QR) with the exact payable amount,
+    accompanied by a Razorpay online payment link and verification instructions.
+    """
+    rzp_url = None
     try:
-        upi_uri = generate_upi_uri(
-            upi_id=settings.SHOP_UPI_ID,
-            payee_name=settings.SHOP_NAME,
-            amount=order.total_amount,
-            order_code=order.order_code,
-            pickup_token=order.pickup_token,
-        )
-        qr_url = generate_qr_code_url(upi_uri, size=350)
-        await whatsapp_service.send_document(
-            to_phone=sender,
-            file_path_or_url=qr_url,
-            filename=f"payment_qr_{order.order_code}.png",
-            caption=(
-                f"💳 *Scan to Pay ₹{order.total_amount:.2f}*\n"
-                f"• Payee: {settings.SHOP_NAME}\n"
-                f"• UPI ID: `{settings.SHOP_UPI_ID}`\n"
-                f"• Order: #{order.order_code} (Token: *{order.pickup_token}*)"
-            ),
-        )
-    except Exception as qr_err:
-        logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
+        rzp_info = await create_razorpay_payment_link(order)
+        if rzp_info:
+            rzp_url = rzp_info.get("short_url")
+    except Exception as e:
+        logger.warning(f"Could not generate Razorpay payment link: {e}")
+
+    # Build clear caption detailing payable amount and tokens
+    caption_lines = [
+        f"💳 *Scan QR to Pay: ₹{order.total_amount:.2f}*",
+        f"• *Shop:* {settings.SHOP_NAME}",
+        f"• *UPI ID:* `{settings.SHOP_UPI_ID}`",
+        f"• *Order Code:* #{order.order_code}",
+        f"• *Pickup Token:* *{order.pickup_token}*",
+        f"• *Total Payable:* *₹{order.total_amount:.2f}*",
+    ]
+    if rzp_url:
+        caption_lines.extend([
+            "",
+            f"🌐 *Or Pay via Razorpay (UPI / Cards / NetBanking):*",
+            f"{rzp_url}",
+        ])
+    caption_lines.extend([
+        "",
+        "⚡ *After paying:* Reply *PAID* or *VERIFY* to auto-check payment and release your print job!",
+    ])
+    caption = "\n".join(caption_lines)
+
+    # Determine image path: custom shop counter QR, or locally generated dynamic QR
+    qr_image_path = None
+    if settings.shop_qr_file.exists():
+        qr_image_path = str(settings.shop_qr_file)
+    else:
+        try:
+            import qrcode
+            upi_uri = generate_upi_uri(
+                upi_id=settings.SHOP_UPI_ID,
+                payee_name=settings.SHOP_NAME,
+                amount=order.total_amount,
+                order_code=order.order_code,
+                pickup_token=order.pickup_token,
+            )
+            qr = qrcode.QRCode(box_size=10, border=2)
+            qr.add_data(upi_uri)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            dynamic_qr_path = settings.storage_path / f"qr_{order.order_code}.png"
+            img.save(str(dynamic_qr_path))
+            qr_image_path = str(dynamic_qr_path)
+        except Exception as gen_err:
+            logger.warning(f"Could not generate local dynamic QR image: {gen_err}")
+
+    # Send QR image
+    if qr_image_path:
+        try:
+            await whatsapp_service.send_image(
+                to_phone=sender,
+                file_path_or_url=qr_image_path,
+                caption=caption,
+            )
+            return
+        except Exception as img_err:
+            logger.warning(f"Sending QR image failed: {img_err}. Sending fallback text.")
+
+    # Fallback to text message if image fails
+    fallback_text = (
+        f"💳 *Payment Details (Order #{order.order_code})*\n\n"
+        f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
+        f"• *Shop UPI ID:* `{settings.SHOP_UPI_ID}`\n"
+        f"• *Pickup Token:* *{order.pickup_token}*\n"
+    )
+    if rzp_url:
+        fallback_text += f"\n🌐 *Pay Online via Razorpay:*\n{rzp_url}\n"
+    fallback_text += "\n👉 Show token at counter or reply *PAID* / *VERIFY* once completed!"
+    await whatsapp_service.send_text_message(to_phone=sender, text=fallback_text)
 
 
 async def get_active_customer_order(session: AsyncSession, user: User) -> Optional[Order]:
@@ -162,7 +220,7 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
         # Dispatch dynamic payment QR code with exact cost
-        await send_payment_qr(sender, order)
+        await send_payment_qr(sender, order, session=session)
         return
 
     # --------------------------------------------------------------------------
@@ -220,11 +278,42 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
-        # Dispatch dynamic payment QR code with exact cost
-            await send_payment_qr(sender, order)
+            # Dispatch dynamic payment QR code with exact cost
+            await send_payment_qr(sender, order, session=session)
             return
 
-        # Subcase C2: Order status check
+        # Subcase C2: Payment Reverification command
+        elif cmd in ["PAID", "VERIFY", "REVERIFY", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE", "STATUS PAYMENT"]:
+            if not order:
+                await whatsapp_service.send_text_message(
+                    to_phone=sender,
+                    text="ℹ️ No active order found to verify payment for. Send a PDF document to start!",
+                )
+                return
+
+            result = await reverify_order_payment(session, order)
+            if result.get("verified"):
+                reply = (
+                    f"✅ *Payment Confirmed!* (Order #{order.order_code})\n\n"
+                    f"• *Status:* QUEUED FOR PRINTING\n"
+                    f"• *Amount Paid:* ₹{order.total_amount:.2f}\n"
+                    f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"🖨️ Your document has been sent to the print queue! Show Token *{order.pickup_token}* at the counter to collect your prints."
+                )
+            else:
+                reply = (
+                    f"⏳ *Payment Verification Update* (Order #{order.order_code})\n\n"
+                    f"• *Status:* {order.status}\n"
+                    f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
+                    f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"{result.get('message', 'Payment not confirmed yet.')}\n\n"
+                    f"👉 If paid at the counter, show Token *{order.pickup_token}* to the shop owner.\n"
+                    f"👉 If paying online, complete via the Razorpay link and reply *VERIFY*."
+                )
+            await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+            return
+
+        # Subcase C3: Order status check
         elif cmd in ["STATUS", "TOKEN", "MY ORDER"]:
             if not order:
                 await whatsapp_service.send_text_message(
@@ -319,4 +408,4 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
                 # Dispatch dynamic payment QR code with exact cost
-                await send_payment_qr(sender, order)
+                await send_payment_qr(sender, order, session=session)

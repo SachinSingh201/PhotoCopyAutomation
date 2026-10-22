@@ -643,43 +643,76 @@
                     </div>
                 </div>
 
-                <!-- Fixed UPI & Dynamic Payment QR Settings -->
+                <!-- Fixed UPI & Shop Counter QR Upload Settings -->
                 <div class="glass-card mt-4" style="margin-top: 24px;">
                     <div class="card-header">
                         <div>
-                            <h3>Shop Fixed UPI & Dynamic Payment QR Generator</h3>
-                            <p class="subtitle">Set your fixed UPI ID to receive payments and test dynamic transaction QR generation & validity</p>
+                            <h3>Shop Payment QR & UPI Settings</h3>
+                            <p class="subtitle">Upload your shop's counter QR code standee or configure fixed UPI for dynamic QR generation</p>
                         </div>
                         <button class="btn btn-sm btn-primary" id="btn-save-upi-settings" onclick="savePaymentSettings()">Save UPI Settings</button>
                     </div>
-                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:24px; margin-top:16px;">
-                        <form id="upi-settings-form" class="form-grid" onsubmit="event.preventDefault(); savePaymentSettings();">
-                            <div class="form-group">
-                                <label>Shop Fixed UPI ID (VPA)</label>
-                                <input type="text" id="setting-upi-id" class="form-input font-mono" placeholder="e.g. printshop@upi or 9876543210@paytm" required oninput="handleUpiInputChange()">
-                                <span id="upi-vpa-feedback" style="font-size:0.75rem; margin-top:4px;"></span>
-                            </div>
-                            <div class="form-group">
-                                <label>Payee Display Name</label>
-                                <input type="text" id="setting-payee-name" class="form-input" placeholder="e.g. Print Express Hub" oninput="handleUpiInputChange()">
-                            </div>
-                            <div class="form-group">
-                                <label>Test Transaction Amount (₹)</label>
-                                <input type="number" step="1" id="test-qr-amount" class="form-input" value="15" oninput="handleUpiInputChange()">
-                            </div>
-                            <div style="display:flex; gap:10px; margin-top:6px;">
-                                <button type="button" class="btn btn-secondary btn-sm" onclick="validateCurrentQR()">Validate QR Compliance</button>
-                                <button type="button" class="btn btn-ghost btn-sm" onclick="resetDefaultUPI()">Reset to Default</button>
-                            </div>
-                        </form>
 
-                        <!-- Live QR Preview & Scanner Tester -->
-                        <div class="glass-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px; background:rgba(30,41,59,0.3);">
-                            <div style="font-size:0.85rem; font-weight:700; color:var(--text-secondary); margin-bottom:10px;">
-                                Live Dynamic Payment QR Preview
+                    <div style="display:grid; grid-template-columns: 1.2fr 1fr; gap:24px; margin-top:16px;">
+                        <div>
+                            <!-- Fixed UPI Parameters Form -->
+                            <form id="upi-settings-form" class="form-grid" onsubmit="event.preventDefault(); savePaymentSettings();">
+                                <div class="form-group">
+                                    <label>Shop Fixed UPI ID (VPA)</label>
+                                    <input type="text" id="setting-upi-id" class="form-input font-mono" placeholder="e.g. printshop@upi or 9876543210@paytm" required oninput="handleUpiInputChange()">
+                                    <span id="upi-vpa-feedback" style="font-size:0.75rem; margin-top:4px;"></span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Payee Display Name</label>
+                                    <input type="text" id="setting-payee-name" class="form-input" placeholder="e.g. Print Express Hub" oninput="handleUpiInputChange()">
+                                </div>
+                                <div class="form-group">
+                                    <label>Test Transaction Amount (₹)</label>
+                                    <input type="number" step="1" id="test-qr-amount" class="form-input" value="15" oninput="handleUpiInputChange()">
+                                </div>
+                                <div style="display:flex; gap:10px; margin-top:6px;">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="validateCurrentQR()">Validate QR Compliance</button>
+                                    <button type="button" class="btn btn-ghost btn-sm" onclick="resetDefaultUPI()">Reset to Default</button>
+                                </div>
+                            </form>
+
+                            <!-- Counter QR Standee Upload Card -->
+                            <div class="glass-card mt-3" style="background:rgba(15,23,42,0.4); border:1px dashed var(--border-color); padding:16px; border-radius:var(--radius-md); margin-top:16px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                                    <h4 style="font-size:0.95rem; font-weight:700; color:#fff;">📤 Upload Shop Counter QR Standee Image</h4>
+                                    <span id="shop-qr-custom-badge" class="status-tag tag-ready" style="font-size:0.7rem;">Dynamic QR Mode</span>
+                                </div>
+                                <p style="font-size:0.8rem; color:var(--text-secondary); margin-bottom:12px;">
+                                    Upload a photo/scan of your physical counter QR code standee (Paytm, PhonePe, Google Pay, BHIM). 
+                                    When uploaded, the system will send this exact image to customers on WhatsApp along with their calculated payable amount!
+                                </p>
+                                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                                    <input type="file" id="shop-qr-file-input" accept="image/png,image/jpeg,image/webp" class="form-input" style="flex:1; min-width:200px; padding:6px 10px; font-size:0.8rem;">
+                                    <button type="button" class="btn btn-sm btn-primary" onclick="uploadShopQRImage()">Upload QR Image</button>
+                                    <button type="button" class="btn btn-sm btn-danger" id="btn-delete-shop-qr" onclick="deleteShopQRImage()" style="display:none;">Remove Custom QR</button>
+                                </div>
                             </div>
-                            <div id="test-qr-wrapper" style="background:#fff; padding:12px; border-radius:var(--radius-md); box-shadow:0 0 16px rgba(0,0,0,0.4); display:inline-block;">
-                                <img id="test-qr-img" src="" alt="UPI QR Preview" width="160" height="160" style="display:block;">
+
+                            <!-- Razorpay Online Payments & Reverification Info -->
+                            <div class="glass-card mt-3" style="background:rgba(37,99,235,0.08); border:1px solid rgba(37,99,235,0.25); padding:14px; border-radius:var(--radius-md); margin-top:16px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <h4 style="font-size:0.9rem; font-weight:700; color:var(--accent-cyan);">⚡ Razorpay UPI & Payment Reverification</h4>
+                                    <span class="status-tag tag-verified" style="font-size:0.7rem;">Active</span>
+                                </div>
+                                <p style="font-size:0.78rem; color:var(--text-secondary); margin-top:6px;">
+                                    Customers receive an instant Razorpay link allowing payments via any UPI app (GPay, PhonePe, Paytm, BHIM), NetBanking, or Cards.
+                                    Customers can reply <b>PAID</b> or <b>VERIFY</b> on WhatsApp to trigger instant server-side reverification, or you can click "Auto-Reverify" inside any order!
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Live QR Code Preview Display -->
+                        <div class="glass-card" style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:20px; background:rgba(30,41,59,0.3);">
+                            <div id="preview-qr-title" style="font-size:0.85rem; font-weight:700; color:var(--text-secondary); margin-bottom:10px;">
+                                Live QR Dispatched to Customers
+                            </div>
+                            <div id="test-qr-wrapper" style="background:#fff; padding:12px; border-radius:var(--radius-md); box-shadow:0 0 16px rgba(0,0,0,0.4); display:inline-block; max-width:240px; max-height:240px; overflow:hidden;">
+                                <img id="test-qr-img" src="" alt="UPI QR Preview" style="display:block; max-width:216px; max-height:216px; object-fit:contain;">
                             </div>
                             <div id="test-qr-uri" class="font-mono" style="font-size:0.72rem; color:var(--text-muted); margin-top:10px; word-break:break-all; max-width:320px;"></div>
                             <span id="test-qr-validity-badge" class="status-tag tag-verified" style="margin-top:8px;">Valid NPCI UPI Format ✅</span>

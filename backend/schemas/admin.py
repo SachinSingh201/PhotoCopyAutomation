@@ -228,6 +228,7 @@ class PaymentSettingRead(BaseModel):
     currency: str
     is_valid_upi: bool
     validation_message: str
+    has_custom_qr: bool = False
 
 
 class PaymentSettingUpdate(BaseModel):
