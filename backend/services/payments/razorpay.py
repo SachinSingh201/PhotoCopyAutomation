@@ -285,14 +285,17 @@ async def reverify_order_payment(session: AsyncSession, order: Order, utr: Optio
                 }
             source_tag = "YOUPI_BANK_SMS_VERIFIED"
         else:
-            if getattr(settings, "UTR_VERIFICATION_MODE", "assisted") == "strict":
+            if getattr(settings, "UTR_VERIFICATION_MODE", "strict") == "strict":
                 return {
                     "verified": False,
                     "status": order.status,
                     "message": (
-                        f"⏳ *Verifying Bank SMS for UTR `{clean_utr}`...*\n\n"
-                        f"We haven't received the bank credit alert from your bank yet (usually takes 15-30 seconds).\n"
-                        f"👉 Please wait a few moments and reply *PAID* again, or show Token *{order.pickup_token}* at the counter."
+                        f"❌ *Bank Credit Not Found for UTR `{clean_utr}`*\n\n"
+                        f"We could not find a confirmed bank credit alert for this 12-digit UTR of ₹{order.total_amount:.2f}.\n\n"
+                        f"👉 *If you just paid:* Bank credit alerts usually take 15–45 seconds. Please wait a moment and reply:\n"
+                        f"*PAID {clean_utr}*\n\n"
+                        f"👉 *Double-check UTR:* Please ensure the 12 digits match the UPI Ref No. / UTR on your Google Pay / PhonePe / Paytm receipt.\n\n"
+                        f"👉 *Paying Cash at Counter?* Show Token *{order.pickup_token}* to the shop owner."
                     ),
                     "pickup_token": order.pickup_token,
                 }

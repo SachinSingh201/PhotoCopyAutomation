@@ -128,7 +128,9 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
             "display_name": "Test Customer",
             "text": "429512345678",
         }
-        await handle_inbound_whatsapp_event(db_session, utr_event)
+        with patch("backend.services.payments.razorpay.check_youpi_observation_for_utr", return_value={"found": True, "amount_matches": True, "actual_amount": order.total_amount}):
+            await handle_inbound_whatsapp_event(db_session, utr_event)
+
         assert mock_send.call_count == 1
         paid_reply = mock_send.call_args[1]["text"]
         assert "Payment Confirmed!" in paid_reply

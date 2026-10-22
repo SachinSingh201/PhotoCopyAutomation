@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1140,6 +1141,73 @@ async def reverify_order_payment_endpoint(
     order = await get_order_by_id(session, order_id)
     res = await reverify_order_payment(session, order)
     return res
+
+
+class SimulateBankSmsRequest(BaseModel):
+    utr: str = Field(..., description="12-digit numeric UPI Ref / UTR")
+    amount: float = Field(..., description="Amount credited in INR")
+    sender_vpa: Optional[str] = "customer@okaxis"
+
+
+@router.post("/payments/simulate-bank-sms")
+async def simulate_bank_sms_endpoint(
+    payload: SimulateBankSmsRequest,
+):
+    """
+    Simulates a real bank credit SMS observation in YouPI-PG's SQLite observation database.
+    Allows testing verified UTR processing without physical SMS.
+    """
+    import hashlib
+    import re
+    import sqlite3
+    import uuid
+    from pathlib import Path
+
+    clean_utr = re.sub(r"[^\d]", "", payload.utr)
+    if len(clean_utr) != 12:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid UTR: '{payload.utr}'. UPI UTR / RRN must be exactly 12 numeric digits.",
+        )
+
+    db_path = Path("YouPI-PG/data/youpi_pg.sqlite")
+    if not db_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="YouPI-PG database file not found at YouPI-PG/data/youpi_pg.sqlite",
+        )
+
+    amount_paise = int(round(payload.amount * 100))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    obs_id = str(uuid.uuid4())
+    fp = hashlib.sha256(f"{clean_utr}:{amount_paise}:{now_iso}".encode()).hexdigest()
+
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM payment_receiving_accounts LIMIT 1")
+    acc_row = cur.fetchone()
+    acc_id = acc_row[0] if acc_row else "00000000-0000-0000-0000-000000000002"
+
+    cur.execute(
+        """
+        INSERT INTO payment_observations (
+            id, receiving_account_id, source, amount_paise, observed_at,
+            ingested_at, sender_vpa, bank_reference_number, fingerprint_hash,
+            raw_payload, attribution_status, created_at
+        ) VALUES (?, ?, 'SIMULATED_BANK_SMS', ?, ?, datetime('now'), ?, ?, ?, '{}', 'UNATTRIBUTED', datetime('now'))
+        """,
+        (obs_id, acc_id, amount_paise, now_iso, payload.sender_vpa, clean_utr, fp),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "status": "success",
+        "message": f"Bank SMS observation registered for UTR {clean_utr} (₹{payload.amount:.2f})",
+        "utr": clean_utr,
+        "amount": payload.amount,
+        "observation_id": obs_id,
+    }
 
 
 @router.get("/payments/validate-qr", response_model=QRValidationResponse)

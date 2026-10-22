@@ -23,6 +23,7 @@ from backend.services.payments.razorpay import create_razorpay_payment_link, rev
 from backend.services.payments.upi import generate_qr_code_url, generate_upi_uri
 from backend.services.payments.youpi import create_youpi_order
 from backend.services.pricing.engine import calculate_order_pricing_snapshot
+from backend.services.security import mask_phone, message_rate_limiter, upload_rate_limiter
 from backend.services.whatsapp.service import whatsapp_service
 
 _pending_doc_replies: Dict[str, asyncio.Task] = {}
@@ -256,7 +257,12 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
     display_name = event.get("display_name") or "Customer"
     event_type = event.get("type", "text")
 
-    # 0. Clean up any unpaid orders that have exceeded the 5-minute payment window
+    # Inbound message rate limiter (anti-spam / anti-loop protection)
+    if not message_rate_limiter.check_message(sender):
+        logger.warning(f"Inbound message rate limit triggered for {mask_phone(sender)}")
+        return
+
+    # 0. Clean up any unpaid orders that have exceeded the payment window
     await cleanup_expired_orders(session)
 
     # 1. Get or create Customer User
@@ -274,6 +280,13 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
     # Case A: Document Attachment Upload (e.g. PDF)
     # --------------------------------------------------------------------------
     if event_type == "document":
+        # Upload Rate Limiting: Max 50 PDF uploads within 5 minutes
+        is_allowed, limit_msg = upload_rate_limiter.check_upload(sender)
+        if not is_allowed:
+            logger.warning(f"Upload rate limit exceeded for {mask_phone(sender)}")
+            await whatsapp_service.send_text_message(to_phone=sender, text=limit_msg)
+            return
+
         doc_info = event.get("document", {})
         filename = doc_info.get("filename") or "document.pdf"
         mime_type = doc_info.get("mime_type") or "application/pdf"

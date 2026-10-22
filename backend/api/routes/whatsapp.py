@@ -29,6 +29,14 @@ async def _process_events_background(events_list: List[Dict[str, Any]]) -> None:
                     await handle_inbound_whatsapp_event(session=db_session, event=event)
                 except Exception as e:
                     logger.error(f"Error handling background WhatsApp event {event.get('message_id')}: {e}", exc_info=True)
+                    if sender and sender != "global":
+                        try:
+                            await whatsapp_service.send_text_message(
+                                to_phone=sender,
+                                text="⚠️ A temporary error occurred while processing your request. Please try again shortly or contact the shop counter.",
+                            )
+                        except Exception:
+                            pass
 
 
 @router.get("")

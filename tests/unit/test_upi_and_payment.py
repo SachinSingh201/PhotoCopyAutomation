@@ -209,12 +209,13 @@ async def test_paid_with_customer_utr_and_pickup_timing(db_session, valid_pdf_6_
         assert "Estimated Pickup Time" in done_call_args.kwargs.get("text", "") or "Estimated Pickup Time" in str(done_call_args)
 
         # 3. Customer pays on Google Pay and replies with 12-digit UTR: "PAID 429512345678"
-        await handle_inbound_whatsapp_event(db_session, {
-            "type": "text",
-            "sender": phone,
-            "display_name": "UTR Customer",
-            "text": "PAID 429512345678",
-        })
+        with patch("backend.services.payments.razorpay.check_youpi_observation_for_utr", return_value={"found": True, "amount_matches": True, "actual_amount": 6.0}):
+            await handle_inbound_whatsapp_event(db_session, {
+                "type": "text",
+                "sender": phone,
+                "display_name": "UTR Customer",
+                "text": "PAID 429512345678",
+            })
 
         # 4. Verify payment was verified and order transitioned to PAID / QUEUED
         user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
@@ -231,3 +232,133 @@ async def test_paid_with_customer_utr_and_pickup_timing(db_session, valid_pdf_6_
         assert "429512345678" in msg_text
         assert paid_order.pickup_token in msg_text
         assert "Estimated Pickup Time" in msg_text
+
+
+@pytest.mark.asyncio
+async def test_fake_utr_rejected_in_strict_mode(db_session, valid_pdf_6_pages):
+    """Verifies that fake or unrecorded UTRs are strictly rejected and not queued."""
+    from unittest.mock import AsyncMock, patch
+    from sqlalchemy import select
+    from backend.models.order import Order
+    from backend.models.user import User
+    from backend.services.orders.state_machine import OrderState
+    from backend.services.whatsapp.bot import handle_inbound_whatsapp_event
+
+    phone = "919955448899"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # Upload and confirm order
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "Strict Customer",
+            "document": {"id": "doc_fake_test", "filename": "doc.pdf", "mime_type": "application/pdf"},
+        })
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Strict Customer",
+            "text": "DONE",
+        })
+
+        # Customer sends fake 12-digit UTR with NO matching bank observation
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "Strict Customer",
+            "text": "PAID 999988887777",
+        })
+
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        order = (await db_session.execute(select(Order).where(Order.user_id == user.id))).scalar_one()
+
+        # Order must REMAIN in PAYMENT_PENDING - must NOT be marked PAID or QUEUED
+        assert order.status == OrderState.PAYMENT_PENDING.value
+
+        # Customer must be informed that bank credit was not found
+        rejection_reply = mock_send.call_args_list[-1]
+        msg = rejection_reply.kwargs.get("text", "") or str(rejection_reply)
+        assert "Bank Credit Not Found" in msg
+        assert "999988887777" in msg
+
+
+@pytest.mark.asyncio
+async def test_upload_rate_limiter_blocks_more_than_50_pdfs(db_session, valid_pdf_6_pages):
+    """Verifies that sending >50 PDFs in less than 5 minutes triggers rate limiting and halts media downloads."""
+    from unittest.mock import AsyncMock, patch
+    from backend.services.security import upload_rate_limiter
+    from backend.services.whatsapp.bot import handle_inbound_whatsapp_event
+
+    phone = "919900112233"
+    upload_rate_limiter.reset(phone)
+
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # Simulate 50 rapid uploads
+        for i in range(50):
+            await handle_inbound_whatsapp_event(db_session, {
+                "type": "document",
+                "sender": phone,
+                "display_name": "Rate Limit Customer",
+                "document": {"id": f"doc_{i}", "filename": f"file_{i}.pdf", "mime_type": "application/pdf"},
+            })
+
+        download_count_before = mock_dl.call_count
+
+        # 51st upload exceeds the limit!
+        mock_send.reset_mock()
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "Rate Limit Customer",
+            "document": {"id": "doc_51_overflow", "filename": "overflow.pdf", "mime_type": "application/pdf"},
+        })
+
+        # Media download was NOT called for 51st file (saves bandwidth and storage)
+        assert mock_dl.call_count == download_count_before
+
+        # Customer was sent the rate limit warning
+        assert mock_send.call_count == 1
+        rate_reply = mock_send.call_args[1]["text"]
+        assert "Rate Limit Exceeded" in rate_reply
+        assert "5 minutes" in rate_reply
+
+    upload_rate_limiter.reset(phone)
+
+
+@pytest.mark.asyncio
+async def test_admin_simulate_bank_sms_endpoint(client):
+    """Verifies that admin can simulate a bank credit SMS observation in YouPI-PG."""
+    from backend.core.config import settings
+
+    headers = {"X-Admin-Secret": settings.ADMIN_SECRET}
+    res = await client.post(
+        "/admin/payments/simulate-bank-sms",
+        headers=headers,
+        json={"utr": "429588889999", "amount": 15.0},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["utr"] == "429588889999"
+    assert data["amount"] == 15.0
+
+    # Test invalid UTR rejected
+    bad_res = await client.post(
+        "/admin/payments/simulate-bank-sms",
+        headers=headers,
+        json={"utr": "123", "amount": 15.0},
+    )
+    assert bad_res.status_code == 400

@@ -56,7 +56,13 @@ class Settings(BaseSettings):
     YOUPI_GATEWAY_URL: str = "http://localhost:6100"
     YOUPI_WEBHOOK_SECRET: str = "youpi_webhook_secret_change_me"
     ORDER_PAYMENT_TIMEOUT_MINUTES: int = 10
-    UTR_VERIFICATION_MODE: str = "assisted"  # "assisted" | "strict"
+    UTR_VERIFICATION_MODE: str = "strict"  # "strict" | "assisted"
+
+    # Rate Limiting & Anti-Abuse (Max 50 PDFs in 5 minutes)
+    RATE_LIMIT_MAX_UPLOADS: int = 50
+    RATE_LIMIT_WINDOW_SECONDS: int = 300
+    RATE_LIMIT_COOLDOWN_SECONDS: int = 300
+    RATE_LIMIT_MAX_MESSAGES_PER_MIN: int = 60
 
     # Pricing (in base currency unit, e.g. INR)
     PRICE_FILE_BASE_CHARGE: float = 5.0
