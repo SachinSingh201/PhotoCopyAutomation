@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.config import settings
 from backend.core.database import get_db
 from backend.core.logging import logger
+from backend.services.whatsapp.bot import handle_inbound_whatsapp_event
 from backend.services.whatsapp.service import verify_openwa_signature, whatsapp_service
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["WhatsApp Webhook"])
@@ -44,7 +45,8 @@ async def receive_whatsapp_event(
     session: AsyncSession = Depends(get_db),
 ):
     """
-    Receives inbound messages and events from WhatsApp (OpenWA Gateway or Meta Cloud API).
+    Receives inbound messages and events from WhatsApp (OpenWA Gateway or Meta Cloud API)
+    and dispatches them to the conversation bot.
     """
     raw_body = await request.body()
 
@@ -63,4 +65,11 @@ async def receive_whatsapp_event(
 
     events = whatsapp_service.parse_incoming_webhook(payload)
     logger.info(f"Processed {len(events)} WhatsApp inbound events via {settings.WHATSAPP_PROVIDER}")
+
+    for event in events:
+        try:
+            await handle_inbound_whatsapp_event(session=session, event=event)
+        except Exception as e:
+            logger.error(f"Error handling WhatsApp event {event.get('message_id')}: {e}", exc_info=True)
+
     return {"status": "received", "event_count": len(events), "events": events}

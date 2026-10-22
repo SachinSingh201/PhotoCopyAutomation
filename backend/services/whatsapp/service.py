@@ -265,10 +265,43 @@ class OpenWAAdapter:
             headers["X-API-Key"] = self.api_key
         return headers
 
+    async def _resolve_session_id(self) -> str:
+        """
+        Dynamically resolves the active session UUID from OpenWA.
+        Matches by name or returns the first ready session.
+        """
+        if getattr(self, "_cached_session_uuid", None):
+            return self._cached_session_uuid
+
+        headers = self._get_headers()
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{self.base_url}/api/sessions", headers=headers)
+                if res.status_code == 200:
+                    sessions = res.json()
+                    # 1. Match by name or existing ID
+                    for s in sessions:
+                        if s.get("name") == self.session_id or s.get("id") == self.session_id:
+                            self._cached_session_uuid = s["id"]
+                            return self._cached_session_uuid
+                    # 2. Pick first ready session
+                    for s in sessions:
+                        if s.get("status") == "ready":
+                            self._cached_session_uuid = s["id"]
+                            return self._cached_session_uuid
+                    if sessions:
+                        self._cached_session_uuid = sessions[0]["id"]
+                        return self._cached_session_uuid
+        except Exception as e:
+            logger.warning(f"Could not auto-resolve OpenWA session UUID: {e}")
+
+        return self.session_id
+
     async def send_text_message(self, to_phone: str, text: str) -> Dict[str, Any]:
         """Sends a text message using OpenWA endpoint: POST /api/sessions/{sessionId}/messages/send-text."""
         chat_id = self._format_chat_id(to_phone)
-        url = f"{self.base_url}/api/sessions/{self.session_id}/messages/send-text"
+        session_id = await self._resolve_session_id()
+        url = f"{self.base_url}/api/sessions/{session_id}/messages/send-text"
         headers = self._get_headers()
         payload = {
             "chatId": chat_id,
@@ -293,7 +326,8 @@ class OpenWAAdapter:
     ) -> Dict[str, Any]:
         """Sends a document using OpenWA endpoint: POST /api/sessions/{sessionId}/messages/send-document."""
         chat_id = self._format_chat_id(to_phone)
-        url = f"{self.base_url}/api/sessions/{self.session_id}/messages/send-document"
+        session_id = await self._resolve_session_id()
+        url = f"{self.base_url}/api/sessions/{session_id}/messages/send-document"
         headers = self._get_headers()
         payload = {
             "chatId": chat_id,
@@ -329,6 +363,12 @@ class OpenWAAdapter:
             return base64.b64decode(media_info["base64"])
 
         media_url = media_info.get("media_url")
+        if not media_url and media_info.get("id"):
+            session_id = await self._resolve_session_id()
+            raw_chat_id = media_info.get("chat_id") or media_info.get("sender") or ""
+            chat_id = self._format_chat_id(raw_chat_id)
+            media_url = f"{self.base_url}/api/sessions/{session_id}/messages/{chat_id}/{media_info['id']}/media"
+
         if not media_url:
             return b"%PDF-1.4 Mock OpenWA PDF content"
 

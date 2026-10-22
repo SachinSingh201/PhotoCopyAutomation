@@ -66,6 +66,7 @@ services:
       - DEFAULT_ENGINE=whatsapp-web.js
       - PORT=2785
       - NODE_ENV=production
+      - WEBHOOK_SSRF_PROTECT=false
     ports:
       - "2785:2785"
     volumes:
