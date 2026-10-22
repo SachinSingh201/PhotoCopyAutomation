@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     PRICE_COLOR_DOUBLE: float = 15.0
     CURRENCY: str = "INR"
 
+    # Shop UPI & Payment QR Configuration
+    SHOP_UPI_ID: str = "printshop@upi"
+    SHOP_NAME: str = "Print Express Hub"
+
     # Print Agent
     PRINT_AGENT_TOKEN: str = "print_agent_secret_token_123"
     PRINT_AGENT_ID: str = "agent-local-01"

@@ -805,6 +805,9 @@ body {
 .btn-ghost:hover { color: #fff; background: rgba(255, 255, 255, 0.05); }
 .btn-emergency { background: linear-gradient(135deg, #dc2626, #b91c1c); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); box-shadow: 0 0 12px rgba(220, 38, 38, 0.4); }
 .btn-emergency:hover { background: #ef4444; box-shadow: 0 0 18px rgba(239, 68, 68, 0.6); }
+.btn-emerald { background: linear-gradient(135deg, #10b981, #059669); color: #fff; border: 1px solid rgba(16, 185, 129, 0.3); box-shadow: 0 0 10px rgba(16, 185, 129, 0.25); }
+.btn-emerald:hover { background: #10b981; box-shadow: 0 0 14px rgba(16, 185, 129, 0.45); }
+
 
 .btn-sm { padding: 4px 10px; font-size: 0.78rem; border-radius: var(--radius-sm); }
 .btn-action-group { display: flex; align-items: center; gap: 6px; }

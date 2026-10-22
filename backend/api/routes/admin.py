@@ -38,6 +38,11 @@ from backend.schemas.admin import (
     PrinterItem,
     PrinterPatchRequest,
     PrintingScheduleItem,
+    AdminPaymentVerifyRequest,
+    PaymentLookupResponse,
+    PaymentSettingRead,
+    PaymentSettingUpdate,
+    QRValidationResponse,
     ReportsSummaryResponse,
     ScheduleExceptionCreate,
     ScheduleExceptionRead,
@@ -50,6 +55,13 @@ from backend.schemas.admin import (
 from backend.schemas.orders import OrderRead
 from backend.services.orders.service import get_order_by_id
 from backend.services.orders.state_machine import OrderState, transition_order
+from backend.services.payments.service import verify_payment_and_enqueue
+from backend.services.payments.upi import (
+    generate_qr_code_url,
+    generate_upi_uri,
+    validate_qr_payload,
+    validate_upi_id,
+)
 from backend.services.queue.service import (
     calculate_order_eta,
     hold_job,
@@ -858,6 +870,234 @@ async def mark_order_collected(order_id: str, session: AsyncSession = Depends(ge
     )
     await session.commit()
     return {"status": "success", "order_id": order.id, "state": order.status}
+
+
+# 8B. Payment Verification & UPI QR Tools
+@router.get("/payments/lookup", response_model=PaymentLookupResponse)
+async def lookup_order_for_payment(
+    query: str = Query(..., min_length=1),
+    session: AsyncSession = Depends(get_db),
+):
+    """Looks up an order by pickup token, order code, or customer phone for payment verification."""
+    clean_q = query.strip()
+    pattern = f"%{clean_q}%"
+
+    stmt = (
+        select(Order)
+        .join(User, User.id == Order.user_id)
+        .where(
+            or_(
+                Order.order_code.ilike(clean_q),
+                Order.pickup_token.ilike(clean_q),
+                Order.order_code.ilike(pattern),
+                Order.pickup_token.ilike(pattern),
+                User.phone_number.ilike(pattern),
+            )
+        )
+        .options(
+            selectinload(Order.files),
+            selectinload(Order.payments),
+            selectinload(Order.user),
+        )
+        .order_by(Order.created_at.desc())
+        .limit(1)
+    )
+    res = await session.execute(stmt)
+    order = res.scalar_one_or_none()
+
+    if not order:
+        return PaymentLookupResponse(found=False)
+
+    pay_status = "UNPAID"
+    if order.payments:
+        pay_status = order.payments[-1].status
+
+    upi_uri = generate_upi_uri(
+        upi_id=settings.SHOP_UPI_ID,
+        payee_name=settings.SHOP_NAME,
+        amount=order.total_amount,
+        order_code=order.order_code,
+        pickup_token=order.pickup_token,
+    )
+    qr_url = generate_qr_code_url(upi_uri, size=350)
+    payable = order.status in [
+        OrderState.AWAITING_CONFIRMATION.value,
+        OrderState.PAYMENT_PENDING.value,
+        OrderState.CONFIGURED.value,
+        OrderState.PRICE_CALCULATED.value,
+    ]
+
+    return PaymentLookupResponse(
+        found=True,
+        order_id=order.id,
+        order_code=order.order_code,
+        pickup_token=order.pickup_token,
+        customer_name=order.user.display_name if order.user else None,
+        customer_phone=order.user.phone_number if order.user else None,
+        total_amount=order.total_amount,
+        total_pages=order.total_pages,
+        file_count=len(order.files),
+        order_status=order.status,
+        payment_status=pay_status,
+        payment_qr_url=qr_url,
+        upi_uri=upi_uri,
+        is_payable=payable,
+    )
+
+
+@router.post("/payments/verify")
+async def admin_verify_payment(
+    payload: AdminPaymentVerifyRequest,
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Verifies payment for an order and automatically transitions it to QUEUED for printing.
+    Can be looked up by order_id, order_code, or pickup_token.
+    """
+    ident = payload.identifier.strip()
+    stmt = (
+        select(Order)
+        .where(
+            or_(
+                Order.id == ident,
+                Order.order_code.ilike(ident),
+                Order.pickup_token.ilike(ident),
+            )
+        )
+        .options(
+            selectinload(Order.files),
+            selectinload(Order.payments),
+            selectinload(Order.user),
+        )
+    )
+    res = await session.execute(stmt)
+    order = res.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail=f"No order found matching identifier '{ident}'")
+
+    now_utc = datetime.now(timezone.utc)
+    provider_payment_id = payload.reference_id.strip() if payload.reference_id else f"UTR_{now_utc.strftime('%Y%m%d%H%M%S')}"
+
+    payment = await verify_payment_and_enqueue(
+        session=session,
+        order=order,
+        provider_payment_id=provider_payment_id,
+    )
+
+    session.add(
+        AuditLog(
+            order_id=order.id,
+            event_type="PAYMENT_VERIFIED_BY_ADMIN",
+            actor_type="ADMIN",
+            actor_id="ADMIN",
+            metadata_json=json.dumps({
+                "provider_payment_id": provider_payment_id,
+                "amount": payment.amount,
+                "pickup_token": order.pickup_token,
+                "order_code": order.order_code,
+                "new_order_status": order.status,
+            }),
+        )
+    )
+    await session.commit()
+
+    return {
+        "status": "success",
+        "message": f"Payment of ₹{payment.amount:.2f} verified for Order #{order.order_code} (Token: {order.pickup_token}). Order is now {order.status}!",
+        "order_id": order.id,
+        "order_code": order.order_code,
+        "pickup_token": order.pickup_token,
+        "order_status": order.status,
+        "payment_status": payment.status,
+        "reference_id": provider_payment_id,
+    }
+
+
+@router.get("/payments/settings", response_model=PaymentSettingRead)
+async def get_payment_settings():
+    """Returns currently configured shop UPI ID, name, and validation status."""
+    v = validate_upi_id(settings.SHOP_UPI_ID)
+    return PaymentSettingRead(
+        shop_upi_id=settings.SHOP_UPI_ID,
+        shop_name=settings.SHOP_NAME,
+        currency=settings.CURRENCY,
+        is_valid_upi=v["valid"],
+        validation_message=v["message"],
+    )
+
+
+@router.put("/payments/settings", response_model=PaymentSettingRead)
+async def update_payment_settings(
+    payload: PaymentSettingUpdate,
+    session: AsyncSession = Depends(get_db),
+):
+    """Updates shop UPI ID and shop name."""
+    v = validate_upi_id(payload.shop_upi_id)
+    if not v["valid"]:
+        raise HTTPException(status_code=400, detail=v["message"])
+
+    settings.SHOP_UPI_ID = payload.shop_upi_id.strip()
+    if payload.shop_name:
+        settings.SHOP_NAME = payload.shop_name.strip()
+
+    session.add(
+        AuditLog(
+            event_type="PAYMENT_SETTINGS_UPDATED",
+            actor_type="ADMIN",
+            actor_id="ADMIN",
+            metadata_json=json.dumps({
+                "shop_upi_id": settings.SHOP_UPI_ID,
+                "shop_name": settings.SHOP_NAME,
+            }),
+        )
+    )
+    await session.commit()
+
+    return PaymentSettingRead(
+        shop_upi_id=settings.SHOP_UPI_ID,
+        shop_name=settings.SHOP_NAME,
+        currency=settings.CURRENCY,
+        is_valid_upi=True,
+        validation_message="UPI ID configured successfully and is valid.",
+    )
+
+
+@router.get("/payments/validate-qr", response_model=QRValidationResponse)
+async def validate_qr_endpoint(
+    qr_payload: Optional[str] = Query(None, alias="payload"),
+    upi_id: Optional[str] = Query(None),
+    amount: Optional[float] = Query(None),
+    order_code: Optional[str] = Query(None),
+    pickup_token: Optional[str] = Query(None),
+):
+    """
+    Checks and validates whether a UPI QR code payload is syntactically valid
+    according to NPCI UPI specifications.
+    """
+    if qr_payload:
+        result = validate_qr_payload(qr_payload)
+    else:
+        uri = generate_upi_uri(
+            upi_id=upi_id or settings.SHOP_UPI_ID,
+            payee_name=settings.SHOP_NAME,
+            amount=amount if amount is not None else 10.0,
+            order_code=order_code or "TEST1001",
+            pickup_token=pickup_token or "TOKEN-01",
+        )
+        result = validate_qr_payload(uri)
+
+    return QRValidationResponse(
+        is_valid=result["is_valid"],
+        raw_payload=result["raw_payload"],
+        scheme=result.get("scheme", ""),
+        payee_vpa=result.get("payee_vpa", ""),
+        payee_name=result.get("payee_name", ""),
+        amount=result.get("amount"),
+        currency=result.get("currency", "INR"),
+        transaction_note=result.get("transaction_note", ""),
+        errors=result.get("errors", []),
+        message=result.get("message", ""),
+    )
 
 
 # 9. Reports & Analytics

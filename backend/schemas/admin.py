@@ -214,3 +214,53 @@ class AuditLogRead(BaseModel):
     actor_id: Optional[str]
     metadata_json: Optional[str]
     created_at: datetime
+
+
+class AdminPaymentVerifyRequest(BaseModel):
+    identifier: str  # order_id, order_code, or pickup_token
+    reference_id: Optional[str] = None  # Bank UTR / UPI Ref / Cash receipt
+    amount: Optional[float] = None
+
+
+class PaymentSettingRead(BaseModel):
+    shop_upi_id: str
+    shop_name: str
+    currency: str
+    is_valid_upi: bool
+    validation_message: str
+
+
+class PaymentSettingUpdate(BaseModel):
+    shop_upi_id: str
+    shop_name: Optional[str] = None
+
+
+class PaymentLookupResponse(BaseModel):
+    found: bool
+    order_id: Optional[str] = None
+    order_code: Optional[str] = None
+    pickup_token: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    total_amount: float = 0.0
+    total_pages: int = 0
+    file_count: int = 0
+    order_status: Optional[str] = None
+    payment_status: Optional[str] = None
+    payment_qr_url: Optional[str] = None
+    upi_uri: Optional[str] = None
+    is_payable: bool = False
+
+
+class QRValidationResponse(BaseModel):
+    is_valid: bool
+    raw_payload: str
+    scheme: str
+    payee_vpa: str
+    payee_name: str
+    amount: Optional[float] = None
+    currency: str
+    transaction_note: str
+    errors: List[str]
+    message: str
+

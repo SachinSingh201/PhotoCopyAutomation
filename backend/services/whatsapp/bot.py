@@ -13,8 +13,35 @@ from backend.services.files.service import process_and_save_order_file
 from backend.services.llm.parser import interpret_print_instructions
 from backend.services.orders.service import create_order, get_or_create_user, get_order_by_id
 from backend.services.orders.state_machine import OrderState, transition_order
+from backend.services.payments.upi import generate_qr_code_url, generate_upi_uri
 from backend.services.pricing.engine import calculate_order_pricing_snapshot
 from backend.services.whatsapp.service import whatsapp_service
+
+
+async def send_payment_qr(sender: str, order: Order) -> None:
+    """Dispatches a dynamic NPCI-compliant UPI QR code prefilled with total costing and pickup token."""
+    try:
+        upi_uri = generate_upi_uri(
+            upi_id=settings.SHOP_UPI_ID,
+            payee_name=settings.SHOP_NAME,
+            amount=order.total_amount,
+            order_code=order.order_code,
+            pickup_token=order.pickup_token,
+        )
+        qr_url = generate_qr_code_url(upi_uri, size=350)
+        await whatsapp_service.send_document(
+            to_phone=sender,
+            file_path_or_url=qr_url,
+            filename=f"payment_qr_{order.order_code}.png",
+            caption=(
+                f"💳 *Scan to Pay ₹{order.total_amount:.2f}*\n"
+                f"• Payee: {settings.SHOP_NAME}\n"
+                f"• UPI ID: `{settings.SHOP_UPI_ID}`\n"
+                f"• Order: #{order.order_code} (Token: *{order.pickup_token}*)"
+            ),
+        )
+    except Exception as qr_err:
+        logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
 
 
 async def get_active_customer_order(session: AsyncSession, user: User) -> Optional[Order]:
@@ -134,19 +161,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         )
         await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
-        # Try to send payment QR code image
-        try:
-            upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
-            encoded_data = urllib.parse.quote(upi_uri)
-            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
-            await whatsapp_service.send_document(
-                to_phone=sender,
-                file_path_or_url=qr_url,
-                filename=f"payment_qr_{order.order_code}.png",
-                caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} (Token: {order.pickup_token})",
-            )
-        except Exception as qr_err:
-            logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
+        # Dispatch dynamic payment QR code with exact cost
+        await send_payment_qr(sender, order)
         return
 
     # --------------------------------------------------------------------------
@@ -204,19 +220,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
-            # Try to send payment QR code image
-            try:
-                upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
-                encoded_data = urllib.parse.quote(upi_uri)
-                qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
-                await whatsapp_service.send_document(
-                    to_phone=sender,
-                    file_path_or_url=qr_url,
-                    filename=f"payment_qr_{order.order_code}.png",
-                    caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} for Token {order.pickup_token}",
-                )
-            except Exception as qr_err:
-                logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
+        # Dispatch dynamic payment QR code with exact cost
+            await send_payment_qr(sender, order)
             return
 
         # Subcase C2: Order status check
@@ -313,16 +318,5 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 )
                 await whatsapp_service.send_text_message(to_phone=sender, text=reply)
 
-                # Try to send payment QR code image
-                try:
-                    upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
-                    encoded_data = urllib.parse.quote(upi_uri)
-                    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
-                    await whatsapp_service.send_document(
-                        to_phone=sender,
-                        file_path_or_url=qr_url,
-                        filename=f"payment_qr_{order.order_code}.png",
-                        caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} (Token: {order.pickup_token})",
-                    )
-                except Exception as qr_err:
-                    logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
+                # Dispatch dynamic payment QR code with exact cost
+                await send_payment_qr(sender, order)

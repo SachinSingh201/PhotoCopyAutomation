@@ -500,6 +500,8 @@ async function fetchOrdersData() {
                     <td>
                         <div class="btn-action-group">
                             <button class="btn btn-sm btn-ghost" onclick="viewOrderDetails('${ord.id}')">Inspect</button>
+                            ${['PAYMENT_PENDING', 'AWAITING_CONFIRMATION', 'PRICE_CALCULATED', 'CONFIGURED'].includes(ord.status) ? 
+                                `<button class="btn btn-sm btn-emerald" onclick="quickVerifyOrder('${ord.id}', '${escapeHtml(ord.pickup_token || ord.order_code)}', ${ord.total_amount})" title="Verify UPI Payment & Enqueue">Verify Pay</button>` : ''}
                             ${ord.status === 'READY_FOR_PICKUP' ? 
                                 `<button class="btn btn-sm btn-primary" onclick="markOrderCollected('${ord.id}')">Collected</button>` : ''}
                         </div>
@@ -574,6 +576,10 @@ async function viewOrderDetails(orderId) {
             `;
         }).join('');
 
+        const isPayable = ['PAYMENT_PENDING', 'AWAITING_CONFIRMATION', 'PRICE_CALCULATED', 'CONFIGURED'].includes(order.status);
+        const upiUri = `upi://pay?pa=printshop@upi&pn=PrintShop&am=${order.total_amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Order #${order.order_code} Token: ${order.pickup_token || ''}`)}`;
+        const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiUri)}`;
+
         modalBody.innerHTML = `
             <div class="form-grid">
                 <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
@@ -582,6 +588,27 @@ async function viewOrderDetails(orderId) {
                     <div><span class="text-muted">Total Pages:</span> <b>${order.total_pages}</b></div>
                     <div><span class="text-muted">Amount:</span> <b>₹${order.total_amount.toFixed(2)}</b></div>
                     <div><span class="text-muted">Created:</span> ${new Date(order.created_at).toLocaleString()}</div>
+                </div>
+
+                <!-- Payment & Dynamic QR Box -->
+                <div class="glass-card mt-3 p-3" style="display:flex; justify-content:space-between; align-items:center; background:rgba(30,41,59,0.4);">
+                    <div style="display:flex; align-items:center; gap:16px;">
+                        <div style="background:#fff; padding:6px; border-radius:var(--radius-sm); width:80px; height:80px; display:flex; align-items:center; justify-content:center;">
+                            <img src="${qrUrl}" alt="QR" width="70" height="70" style="display:block;">
+                        </div>
+                        <div>
+                            <div style="font-weight:700;">Dynamic Payment QR (${escapeHtml(order.pickup_token || order.order_code)})</div>
+                            <div style="font-size:0.8rem; color:var(--text-muted); margin-top:2px;">Amount: <b>₹${order.total_amount.toFixed(2)}</b></div>
+                            <div class="font-mono text-muted" style="font-size:0.7rem; margin-top:2px; word-break:break-all; max-width:280px;">${escapeHtml(upiUri)}</div>
+                        </div>
+                    </div>
+                    <div>
+                        ${isPayable ? `
+                            <button class="btn btn-emerald btn-sm" onclick="quickVerifyOrder('${order.id}', '${escapeHtml(order.pickup_token || order.order_code)}', ${order.total_amount})">
+                                ⚡ Verify Payment & Print
+                            </button>
+                        ` : `<span class="status-tag ${order.status === 'READY_FOR_PICKUP' ? 'tag-ready' : 'tag-verified'}">${order.status}</span>`}
+                    </div>
                 </div>
 
                 <h4 class="mt-4">Attached Documents (${order.files ? order.files.length : 0})</h4>
@@ -851,6 +878,8 @@ async function fetchSettingsData() {
         document.getElementById('price-bw-double').value = pricing.bw_double;
         document.getElementById('price-color-single').value = pricing.color_single;
         document.getElementById('price-color-double').value = pricing.color_double;
+
+        await fetchPaymentSettings();
     } catch (err) {}
 }
 
@@ -886,6 +915,199 @@ async function savePricingRates() {
         });
         showToast("Pricing parameters updated!", "success");
     } catch (err) {}
+}
+
+// 10B. Payment Verification & Shop UPI Functions
+async function lookupPaymentOrder() {
+    const input = document.getElementById('pay-verify-token-input');
+    const query = input ? input.value.trim() : '';
+    if (!query) {
+        showToast("Please enter a Pickup Token or Order Code", "warning");
+        return;
+    }
+
+    const resultBox = document.getElementById('pay-lookup-result');
+    if (!resultBox) return;
+
+    try {
+        const res = await apiRequest(`/payments/lookup?query=${encodeURIComponent(query)}`);
+        if (!res.found) {
+            resultBox.style.display = 'block';
+            resultBox.innerHTML = `
+                <div style="background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); border-radius:var(--radius-md); padding:12px; color:#f87171; font-size:0.88rem;">
+                    ❌ No order found matching "<b>${escapeHtml(query)}</b>". Please verify the pickup token.
+                </div>
+            `;
+            return;
+        }
+
+        resultBox.style.display = 'block';
+        const payable = res.is_payable;
+        resultBox.innerHTML = `
+            <div style="display:grid; grid-template-columns: auto 1fr auto; gap:20px; align-items:center; background:rgba(30,41,59,0.5); padding:16px; border-radius:var(--radius-md); border:1px solid var(--border-color);">
+                <div style="background:#fff; padding:6px; border-radius:var(--radius-sm); width:92px; height:92px; display:flex; align-items:center; justify-content:center;">
+                    <img src="${res.payment_qr_url}" alt="QR" width="80" height="80" style="display:block;">
+                </div>
+                <div>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="font-mono font-bold" style="font-size:1.1rem; color:var(--accent-emerald);">Token: ${escapeHtml(res.pickup_token || '—')}</span>
+                        <span class="font-mono text-muted">(${escapeHtml(res.order_code)})</span>
+                        <span class="status-tag ${getStatusClass(res.order_status)}">${res.order_status}</span>
+                    </div>
+                    <div style="font-size:0.85rem; color:var(--text-secondary); margin-top:4px;">
+                        Customer: <b>${escapeHtml(res.customer_name || res.customer_phone || 'Customer')}</b> • 
+                        Files: <b>${res.file_count}</b> • Pages: <b>${res.total_pages}</b> • 
+                        Payment: <span class="status-tag tag-${res.payment_status.toLowerCase()}">${res.payment_status}</span>
+                    </div>
+                    <div style="font-size:1.2rem; font-weight:800; color:#fff; margin-top:6px;">
+                        Total Payable: <span style="color:var(--accent-emerald);">₹${res.total_amount.toFixed(2)}</span>
+                    </div>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
+                    <div style="display:flex; gap:6px;">
+                        <input type="text" id="pay-utr-input" class="form-input font-mono" placeholder="UTR / Ref ID (optional)" style="width:170px; font-size:0.8rem; padding:6px 10px;">
+                        <button class="btn btn-emerald" onclick="confirmPaymentAndEnqueue('${res.order_id}', '${res.pickup_token}')">
+                            ${payable ? '✓ Verify & Print' : '✓ Re-Verify Payment'}
+                        </button>
+                    </div>
+                    <span style="font-size:0.75rem; color:var(--text-muted);">Confirms UPI payment and queues print job</span>
+                </div>
+            </div>
+        `;
+    } catch (err) {}
+}
+
+async function confirmPaymentAndEnqueue(orderId, token) {
+    const utrInput = document.getElementById('pay-utr-input');
+    const refId = utrInput ? utrInput.value.trim() : '';
+
+    try {
+        await apiRequest('/payments/verify', {
+            method: 'POST',
+            body: JSON.stringify({
+                identifier: orderId,
+                reference_id: refId || undefined
+            })
+        });
+        showToast(`Payment verified for token ${token}! Print job queued.`, "success");
+        const resultBox = document.getElementById('pay-lookup-result');
+        if (resultBox) resultBox.style.display = 'none';
+        const tokenInput = document.getElementById('pay-verify-token-input');
+        if (tokenInput) tokenInput.value = '';
+
+        fetchOrdersData();
+        fetchQueueData();
+        fetchDashboardData();
+        closeModal('order-detail-modal');
+    } catch (err) {}
+}
+
+async function quickVerifyOrder(orderId, token, amount) {
+    const ref = prompt(`Confirm payment of ₹${amount.toFixed(2)} for Token ${token}?\nEnter UPI UTR / Reference ID (or leave blank to auto-verify):`, "");
+    if (ref === null) return;
+
+    try {
+        await apiRequest('/payments/verify', {
+            method: 'POST',
+            body: JSON.stringify({
+                identifier: orderId,
+                reference_id: ref.trim() || undefined
+            })
+        });
+        showToast(`Payment of ₹${amount.toFixed(2)} verified! Order printing.`, "success");
+        fetchOrdersData();
+        fetchQueueData();
+        fetchDashboardData();
+        closeModal('order-detail-modal');
+    } catch (err) {}
+}
+
+async function fetchPaymentSettings() {
+    try {
+        const res = await apiRequest('/payments/settings');
+        const upiInput = document.getElementById('setting-upi-id');
+        const nameInput = document.getElementById('setting-payee-name');
+        if (upiInput) upiInput.value = res.shop_upi_id;
+        if (nameInput) nameInput.value = res.shop_name;
+
+        updateTestQRPreview(res.shop_upi_id, res.shop_name);
+    } catch (err) {}
+}
+
+function updateTestQRPreview(customUpi, customName) {
+    const upiId = (customUpi || document.getElementById('setting-upi-id')?.value || 'printshop@upi').trim();
+    const payeeName = (customName || document.getElementById('setting-payee-name')?.value || 'Print Express Hub').trim();
+    const amount = parseFloat(document.getElementById('test-qr-amount')?.value || '15') || 15;
+
+    const uri = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payeeName)}&am=${amount.toFixed(2)}&cu=INR&tn=${encodeURIComponent('Test Transaction')}`;
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=350x350&data=${encodeURIComponent(uri)}`;
+
+    const img = document.getElementById('test-qr-img');
+    const uriText = document.getElementById('test-qr-uri');
+    const badge = document.getElementById('test-qr-validity-badge');
+
+    if (img) img.src = qrUrl;
+    if (uriText) uriText.textContent = uri;
+
+    const isValid = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z0-9.\-_]{2,64}$/.test(upiId);
+    const feedback = document.getElementById('upi-vpa-feedback');
+    if (feedback) {
+        feedback.textContent = isValid ? "✓ Valid UPI handle format" : "⚠ Must be in format handle@bank (e.g. name@okhdfcbank)";
+        feedback.style.color = isValid ? "var(--accent-emerald)" : "var(--accent-coral)";
+    }
+    if (badge) {
+        badge.textContent = isValid ? "Valid NPCI UPI Format ✅" : "Invalid UPI VPA ❌";
+        badge.className = `status-tag ${isValid ? 'tag-verified' : 'tag-failed'}`;
+    }
+}
+
+function handleUpiInputChange() {
+    updateTestQRPreview();
+}
+
+async function savePaymentSettings() {
+    const upiId = document.getElementById('setting-upi-id')?.value.trim();
+    const payeeName = document.getElementById('setting-payee-name')?.value.trim();
+
+    if (!upiId) {
+        showToast("Please provide a valid UPI ID", "warning");
+        return;
+    }
+
+    try {
+        const res = await apiRequest('/payments/settings', {
+            method: 'PUT',
+            body: JSON.stringify({
+                shop_upi_id: upiId,
+                shop_name: payeeName || undefined
+            })
+        });
+        showToast("Payment UPI settings saved successfully!", "success");
+        updateTestQRPreview(res.shop_upi_id, res.shop_name);
+    } catch (err) {}
+}
+
+async function validateCurrentQR() {
+    const upiId = document.getElementById('setting-upi-id')?.value.trim();
+    const payeeName = document.getElementById('setting-payee-name')?.value.trim();
+    const amount = parseFloat(document.getElementById('test-qr-amount')?.value || '15') || 15;
+
+    try {
+        const res = await apiRequest(`/payments/validate-qr?upi_id=${encodeURIComponent(upiId)}&amount=${amount}&order_code=TESTORD&pickup_token=TOK-99`);
+        if (res.is_valid) {
+            showToast(`QR Code is 100% NPCI UPI Compliant! Payee: ${res.payee_vpa}`, "success");
+        } else {
+            showToast(`QR Validation Error: ${res.errors.join(', ')}`, "error");
+        }
+    } catch (err) {}
+}
+
+function resetDefaultUPI() {
+    const upiInput = document.getElementById('setting-upi-id');
+    const nameInput = document.getElementById('setting-payee-name');
+    if (upiInput) upiInput.value = 'printshop@upi';
+    if (nameInput) nameInput.value = 'Print Express Hub';
+    updateTestQRPreview('printshop@upi', 'Print Express Hub');
 }
 
 // 11. Service Controls

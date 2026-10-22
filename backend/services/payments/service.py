@@ -8,6 +8,7 @@ from backend.core.exceptions import AppException, ErrorCode
 from backend.core.logging import logger
 from backend.models.order import Order
 from backend.models.payment import Payment
+from backend.models.user import User
 from backend.schemas.payments import PaymentCreateResponse
 from backend.services.orders.state_machine import OrderState, transition_order
 from backend.services.queue.service import enqueue_verified_order
@@ -90,20 +91,45 @@ async def verify_payment_and_enqueue(
     payment = res.scalar_one_or_none()
 
     if not payment:
-        raise AppException(
-            code=ErrorCode.PAYMENT_NOT_VERIFIED,
-            message=f"No payment record found for order {order.id}",
-            status_code=404,
+        payment = Payment(
+            order_id=order.id,
+            provider=settings.PAYMENT_PROVIDER or "UPI",
+            provider_order_id=f"pay_order_{order.order_code}",
+            amount=order.total_amount,
+            currency=order.currency,
+            status="INITIATED",
         )
+        session.add(payment)
+        await session.flush()
 
     # Idempotency check
     if payment.status == "VERIFIED" and order.status in [
         OrderState.PAID.value,
         OrderState.QUEUED.value,
         OrderState.WAITING_FOR_PRINT_WINDOW.value,
+        OrderState.PRINTING.value,
+        OrderState.PRINTED.value,
+        OrderState.READY_FOR_PICKUP.value,
+        OrderState.COLLECTED.value,
     ]:
         logger.info(f"Payment already verified for order {order.id}")
         return payment
+
+    # Ensure order is in PAYMENT_PENDING state before transitioning to PAID
+    if order.status != OrderState.PAYMENT_PENDING.value:
+        if order.status == OrderState.FILES_UPLOADING.value:
+            await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="SYSTEM")
+        if order.status == OrderState.FILES_UPLOADED.value:
+            await transition_order(session, order, OrderState.CONFIGURATION_PENDING, actor_type="SYSTEM")
+        if order.status == OrderState.CONFIGURATION_PENDING.value:
+            await transition_order(session, order, OrderState.CONFIGURED, actor_type="SYSTEM")
+            await transition_order(session, order, OrderState.PRICE_CALCULATED, actor_type="BACKEND")
+            await transition_order(session, order, OrderState.AWAITING_CONFIRMATION, actor_type="SYSTEM")
+        elif order.status == OrderState.PRICE_CALCULATED.value:
+            await transition_order(session, order, OrderState.AWAITING_CONFIRMATION, actor_type="SYSTEM")
+
+        if order.status == OrderState.AWAITING_CONFIRMATION.value:
+            await transition_order(session, order, OrderState.PAYMENT_PENDING, actor_type="SYSTEM")
 
     # In production, verify HMAC signature or query provider API
     # In mock provider mode, accept any non-empty provider_payment_id
@@ -136,4 +162,23 @@ async def verify_payment_and_enqueue(
         )
 
     await session.flush()
+
+    # Notify customer via WhatsApp if customer details available
+    if order.user_id:
+        u_res = await session.execute(select(User).where(User.id == order.user_id))
+        user = u_res.scalar_one_or_none()
+        if user and (user.whatsapp_user_id or user.phone_number):
+            customer_phone = user.whatsapp_user_id or user.phone_number
+            try:
+                from backend.services.whatsapp.service import whatsapp_service
+                confirm_msg = (
+                    f"🎉 *Payment of ₹{payment.amount:.2f} Verified!*\n"
+                    f"• *Order Code:* #{order.order_code}\n"
+                    f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"🖨️ Your documents are now queued for printing! We will notify you once ready for pickup."
+                )
+                await whatsapp_service.send_text_message(to_phone=customer_phone, text=confirm_msg)
+            except Exception as wa_err:
+                logger.warning(f"Could not dispatch payment confirmation WhatsApp message: {wa_err}")
+
     return payment
