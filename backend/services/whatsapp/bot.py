@@ -1,8 +1,10 @@
 import json
+import urllib.parse
 from typing import Any, Dict, Optional
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from backend.core.config import settings
 from backend.core.logging import logger
 from backend.models.file import OrderFile
 from backend.models.order import Order
@@ -112,18 +114,39 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         # Reload order to reflect fresh state
         order = await get_order_by_id(session, order.id)
 
+        base_charge = len(order.files) * settings.PRICE_FILE_BASE_CHARGE
+        print_charge = max(0.0, order.total_amount - base_charge)
+
         reply = (
-            f"📄 *Document Received!*\n"
-            f"• *File:* {order_file.original_filename} ({order_file.page_count} pages)\n"
-            f"• *Total Files:* {len(order.files)} ({order.total_pages} total pages)\n"
-            f"• *Order Code:* #{order.order_code}\n\n"
-            f"💬 *Reply with your printing instructions:*\n"
-            f"• e.g. *\"Single side all pages\"*\n"
-            f"• e.g. *\"Black and white double sided\"*\n"
-            f"• e.g. *\"Color first page, rest B&W\"*\n\n"
-            f"Or reply *CONFIRM* to print with standard single-sided B&W!"
+            f"📄 *Document Received & Analyzed!*\n"
+            f"• *File:* {order_file.original_filename}\n"
+            f"• *Page Count:* {order_file.page_count} pages\n"
+            f"• *Total Files in Order:* {len(order.files)} ({order.total_pages} total pages)\n"
+            f"• *Order Code:* #{order.order_code}\n"
+            f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+            f"💰 *Cost Estimation (Standard Single-Sided B&W):*\n"
+            f"• Document Handling: ₹{base_charge:.2f}\n"
+            f"• Print Charge ({order.total_pages} pages @ ₹{settings.PRICE_BW_SINGLE:.2f}/page): ₹{print_charge:.2f}\n"
+            f"• *Estimated Total: ₹{order.total_amount:.2f}*\n\n"
+            f"💬 *Options:*\n"
+            f"• Reply with custom instructions: e.g. *\"Single side all pages\"*, *\"Double sided\"*, *\"Color front page\"*\n"
+            f"• Or reply *CONFIRM* to lock in your order with this price!"
         )
         await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+
+        # Try to send payment QR code image
+        try:
+            upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
+            encoded_data = urllib.parse.quote(upi_uri)
+            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
+            await whatsapp_service.send_document(
+                to_phone=sender,
+                file_path_or_url=qr_url,
+                filename=f"payment_qr_{order.order_code}.png",
+                caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} (Token: {order.pickup_token})",
+            )
+        except Exception as qr_err:
+            logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
         return
 
     # --------------------------------------------------------------------------
@@ -180,6 +203,20 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 f"Once paid, your order will automatically be dispatched to the printer!"
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+
+            # Try to send payment QR code image
+            try:
+                upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
+                encoded_data = urllib.parse.quote(upi_uri)
+                qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
+                await whatsapp_service.send_document(
+                    to_phone=sender,
+                    file_path_or_url=qr_url,
+                    filename=f"payment_qr_{order.order_code}.png",
+                    caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} for Token {order.pickup_token}",
+                )
+            except Exception as qr_err:
+                logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")
             return
 
         # Subcase C2: Order status check
@@ -259,12 +296,33 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 color_desc = cfg_first.color_mode.upper() if cfg_first else "BW"
                 sides_desc = cfg_first.default_sides.capitalize() if cfg_first else "Single"
 
+                base_charge = len(order.files) * settings.PRICE_FILE_BASE_CHARGE
+                print_charge = max(0.0, order.total_amount - base_charge)
+
                 reply = (
                     f"✅ *Print Options Configured:*\n"
                     f"• *Sides:* {sides_desc}\n"
                     f"• *Color Mode:* {color_desc}\n"
                     f"• *Total Pages:* {order.total_pages}\n"
-                    f"• *Estimated Total:* ₹{order.total_amount:.2f}\n\n"
-                    f"👉 Reply *CONFIRM* to lock in your order and get your pickup token!"
+                    f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"💰 *Updated Cost Estimation:*\n"
+                    f"• Document Handling: ₹{base_charge:.2f}\n"
+                    f"• Printing ({order.total_pages} pages): ₹{print_charge:.2f}\n"
+                    f"• *Total Cost: ₹{order.total_amount:.2f}*\n\n"
+                    f"👉 Reply *CONFIRM* to lock in your order!"
                 )
                 await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+
+                # Try to send payment QR code image
+                try:
+                    upi_uri = f"upi://pay?pa=printshop@upi&pn=PrintShop&am={order.total_amount:.2f}&cu=INR&tn={order.order_code}"
+                    encoded_data = urllib.parse.quote(upi_uri)
+                    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
+                    await whatsapp_service.send_document(
+                        to_phone=sender,
+                        file_path_or_url=qr_url,
+                        filename=f"payment_qr_{order.order_code}.png",
+                        caption=f"💳 Scan to Pay ₹{order.total_amount:.2f} (Token: {order.pickup_token})",
+                    )
+                except Exception as qr_err:
+                    logger.info(f"Payment QR code image dispatch skipped/failed: {qr_err}. Total cost already sent in text.")

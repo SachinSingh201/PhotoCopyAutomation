@@ -96,3 +96,9 @@ app.include_router(agent.router)
 # Admin router under /admin and /api/v1/admin
 app.include_router(admin.router)
 app.include_router(admin.router, prefix="/api/v1")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)
+

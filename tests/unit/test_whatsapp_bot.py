@@ -13,12 +13,13 @@ from backend.services.whatsapp.bot import handle_inbound_whatsapp_event, get_act
 async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_pages):
     phone = "919988776655"
 
-    # Mock download_media to return our valid 6-page test PDF
     with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
-         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send:
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_document", new_callable=AsyncMock) as mock_doc:
 
         mock_dl.return_value = valid_pdf_6_pages
         mock_send.return_value = {"status": "success"}
+        mock_doc.return_value = {"status": "success"}
 
         # 1. Customer sends document PDF
         doc_event = {
@@ -43,15 +44,23 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         assert order.files[0].page_count == 6
         assert order.total_pages == 6
 
-        # Verify WhatsApp confirmation was sent
+        # Verify WhatsApp confirmation text was sent with page count and cost estimation
         assert mock_send.call_count == 1
         sent_text = mock_send.call_args[1]["text"]
-        assert "Document Received!" in sent_text
+        assert "Document Received & Analyzed!" in sent_text
         assert "my_notes.pdf" in sent_text
         assert "6 pages" in sent_text
+        assert "Cost Estimation" in sent_text
+        assert "Estimated Total" in sent_text
+        assert order.pickup_token in sent_text
+
+        # Verify QR code image was dispatched
+        assert mock_doc.call_count == 1
+        assert "payment_qr" in mock_doc.call_args[1]["filename"]
 
         # 2. Customer replies with instructions: "Single side all pages"
         mock_send.reset_mock()
+        mock_doc.reset_mock()
         text_event = {
             "type": "text",
             "sender": phone,
@@ -67,9 +76,12 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         instruction_reply = mock_send.call_args[1]["text"]
         assert "Print Options Configured" in instruction_reply
         assert "Single" in instruction_reply
+        assert "Updated Cost Estimation" in instruction_reply
+        assert mock_doc.call_count == 1
 
         # 3. Customer confirms order: "CONFIRM"
         mock_send.reset_mock()
+        mock_doc.reset_mock()
         confirm_event = {
             "type": "text",
             "sender": phone,
@@ -85,3 +97,4 @@ async def test_bot_document_upload_and_instruction_flow(db_session, valid_pdf_6_
         confirm_reply = mock_send.call_args[1]["text"]
         assert "Order Confirmed!" in confirm_reply
         assert order.pickup_token in confirm_reply
+        assert mock_doc.call_count == 1
