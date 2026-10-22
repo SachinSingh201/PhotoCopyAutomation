@@ -1,4 +1,7 @@
+import asyncio
 import json
+import math
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -6,6 +9,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from backend.core.config import settings
+from backend.core.database import AsyncSessionLocal
 from backend.core.logging import logger
 from backend.models.file import OrderFile
 from backend.models.order import Order
@@ -21,11 +25,25 @@ from backend.services.payments.youpi import create_youpi_order
 from backend.services.pricing.engine import calculate_order_pricing_snapshot
 from backend.services.whatsapp.service import whatsapp_service
 
+_pending_doc_replies: Dict[str, asyncio.Task] = {}
+
+
+def get_order_pickup_timing(order: Order, ppm: int = 20) -> Dict[str, Any]:
+    """Calculates estimated print duration and expected pickup clock time."""
+    pages = max(1, order.total_pages or 1)
+    duration_sec = 10 + math.ceil((pages / max(ppm, 1)) * 60)
+    eta_mins = max(1, math.ceil(duration_sec / 60))
+    ready_time = datetime.now() + timedelta(minutes=eta_mins)
+    return {
+        "eta_mins": eta_mins,
+        "ready_time_str": ready_time.strftime("%I:%M %p"),
+    }
+
 
 async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSession] = None) -> None:
     """
     Dispatches the shop counter QR code (or local dynamic UPI QR / YouPI checkout) with the exact payable amount.
-    Includes the 5-minute payment expiration warning.
+    Includes the 5-minute payment expiration warning and estimated pickup timing.
     """
     youpi_info = None
     if settings.PAYMENT_PROVIDER == "youpi":
@@ -43,7 +61,9 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         except Exception as e:
             logger.warning(f"Could not generate Razorpay payment link: {e}")
 
-    # Build clear caption detailing payable amount, 5-minute timeout, and tokens
+    timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
+
+    # Build clear caption detailing payable amount, pickup timing, 5-minute timeout, and tokens
     caption_lines = [
         f"💳 *Scan QR to Pay: ₹{order.total_amount:.2f}*",
         f"• *Shop:* {settings.SHOP_NAME}",
@@ -51,6 +71,7 @@ async def send_payment_qr(sender: str, order: Order, session: Optional[AsyncSess
         f"• *Order Code:* #{order.order_code}",
         f"• *Pickup Token:* *{order.pickup_token}*",
         f"• *Total Payable:* *₹{order.total_amount:.2f}*",
+        f"🕒 *Estimated Pickup Time:* ~{timing['eta_mins']} mins (Ready by ~{timing['ready_time_str']})",
         f"⏱️ *Payment Window: 5 minutes* (Order will be deleted if unpaid)",
     ]
     if youpi_info and youpi_info.get("payment_url"):
@@ -306,11 +327,13 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
         # Reload order to reflect fresh state
         order = await get_order_by_id(session, order.id)
 
-        # Concise file confirmation - DO NOT send QR code or invoice for every file!
+        # Concise file confirmation with estimated print time
+        timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
         reply = (
             f"📄 *File {len(order.files)} of {settings.MAX_FILES_PER_ORDER} Received!*\n"
             f"• *File:* {order_file.original_filename} ({order_file.page_count} pages)\n"
-            f"• *Files in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n\n"
+            f"• *Files in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n"
+            f"• *Estimated Print Time:* ~{timing['eta_mins']} mins\n\n"
             f"👉 Send another PDF to add more files to this order (up to {settings.MAX_FILES_PER_ORDER}).\n"
             f"👉 Reply *DONE* (or *CONFIRM*) once you have sent all your files to get the final bill & payment QR!\n"
             f"👉 Or reply *CANCEL* to discard this order."
@@ -396,12 +419,13 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await calculate_order_pricing_snapshot(session, order)
             await session.commit()
 
-            # Build single comprehensive bill receipt
+            # Build single comprehensive bill receipt with pickup timing
             file_count = len(order.files)
             files_breakdown = "\n".join([f"  {idx}. {f.original_filename} ({f.page_count} pages)" for idx, f in enumerate(order.files, 1)])
             base_charge = file_count * settings.PRICE_FILE_BASE_CHARGE
             print_charge = max(0.0, order.total_amount - base_charge)
             expiry_str = (now + timedelta(minutes=settings.ORDER_PAYMENT_TIMEOUT_MINUTES)).strftime("%I:%M %p")
+            timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
 
             reply = (
                 f"🧾 *Order Confirmed & Bill Receipt* (Order #{order.order_code})\n\n"
@@ -411,10 +435,11 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 f"• *Document Handling:* ₹{base_charge:.2f}\n"
                 f"• *Print Charge:* ₹{print_charge:.2f}\n"
                 f"• *Total Amount:* *₹{order.total_amount:.2f}*\n\n"
+                f"🕒 *Estimated Pickup Time:* ~{timing['eta_mins']} mins after payment (Ready by approx. {timing['ready_time_str']})\n"
                 f"⏳ *Payment Window: 5 MINUTES* (Expires at {expiry_str})\n"
                 f"⚠️ *Important:* If payment is not completed within 5 minutes, this order and its uploaded files will be permanently deleted!\n\n"
                 f"💳 Please scan the QR code below or pay via UPI.\n"
-                f"⚡ After paying, reply *PAID* or *VERIFY* (or wait for auto-confirmation via YouPI-PG)!\n"
+                f"⚡ After paying, reply *PAID* or *PAID <UTR>* (e.g. `PAID 429512345678`)!\n"
                 f"❌ Reply *CANCEL* to cancel this order anytime."
             )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
@@ -423,8 +448,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await send_payment_qr(sender, order, session=session)
             return
 
-        # Subcase C3: Payment Reverification command
-        elif cmd in ["PAID", "VERIFY", "REVERIFY", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE", "STATUS PAYMENT"]:
+        # Subcase C3: Payment Reverification command (supports optional 10-14 digit UTR)
+        elif any(cmd.startswith(prefix) for prefix in ["PAID", "VERIFY", "REVERIFY", "UTR", "CHECK PAYMENT", "PAYMENT DONE", "PAYMENT COMPLETE"]):
             if not order:
                 await whatsapp_service.send_text_message(
                     to_phone=sender,
@@ -432,13 +457,19 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 )
                 return
 
-            result = await reverify_order_payment(session, order)
+            utr_match = re.search(r"\b(\d{10,14})\b", user_text)
+            extracted_utr = utr_match.group(1) if utr_match else None
+
+            result = await reverify_order_payment(session, order, utr=extracted_utr)
             if result.get("verified"):
+                timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
+                ref_info = f"\n• *Payment Ref / UTR:* `{result.get('utr')}`" if result.get('utr') else ""
                 reply = (
                     f"✅ *Payment Confirmed!* (Order #{order.order_code})\n\n"
                     f"• *Status:* QUEUED FOR PRINTING\n"
                     f"• *Amount Paid:* ₹{order.total_amount:.2f}\n"
-                    f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"• *Pickup Token:* *{order.pickup_token}*{ref_info}\n"
+                    f"🕒 *Estimated Pickup Time:* Ready in ~{timing['eta_mins']} mins (by approx. {timing['ready_time_str']})!\n\n"
                     f"🖨️ Your document has been sent to the print queue! Show Token *{order.pickup_token}* at the counter to collect your prints.\n\n"
                     f"✨ *Need more prints?* You can send another PDF right now to place a new order instantaneously!"
                 )
@@ -449,8 +480,9 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"• *Payable Amount:* ₹{order.total_amount:.2f}\n"
                     f"• *Pickup Token:* *{order.pickup_token}*\n\n"
                     f"{result.get('message', 'Payment not confirmed yet.')}\n\n"
-                    f"👉 If paid at the counter, show Token *{order.pickup_token}* to the shop owner.\n"
-                    f"👉 If paying online, complete via the Razorpay link and reply *VERIFY*.\n"
+                    f"👉 If you already paid via UPI, reply with your 12-digit UTR/Ref number:\n"
+                    f"*PAID <12-digit UTR>* (e.g. `PAID 429512345678`)\n"
+                    f"👉 If paying in cash at the counter, show Token *{order.pickup_token}* to the shop owner.\n"
                     f"👉 Reply *CANCEL* if you wish to cancel this order."
                 )
             await whatsapp_service.send_text_message(to_phone=sender, text=reply)
@@ -468,15 +500,17 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
 
             lines = ["📋 *Your Active Print Orders:*\n"]
             for idx, o in enumerate(active_orders, 1):
+                timing = get_order_pickup_timing(o, settings.PRINTER_SPEED_PPM)
                 lines.append(
                     f"*{idx}. Order #{o.order_code}*\n"
                     f"• *Pickup Token:* *{o.pickup_token}*\n"
                     f"• *Status:* {o.status}\n"
                     f"• *Files:* {len(o.files)} ({o.total_pages} pages)\n"
                     f"• *Amount:* ₹{o.total_amount:.2f}\n"
+                    f"• *Estimated Pickup Time:* ~{timing['eta_mins']} mins (Ready by ~{timing['ready_time_str']})\n"
                 )
             lines.extend([
-                "👉 Reply *PAID* to verify online payments.",
+                "👉 Reply *PAID* or *PAID <UTR>* to verify online payments.",
                 "👉 Reply *CANCEL* to cancel an active order.",
                 "👉 Send a new PDF to place another order instantaneously!"
             ])

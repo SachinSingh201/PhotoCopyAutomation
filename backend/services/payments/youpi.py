@@ -211,12 +211,20 @@ async def process_youpi_payment_success(
 
     # Notify customer via WhatsApp
     if order.user and order.user.phone_number:
+        import math
+        from datetime import timedelta
+        pages = max(1, order.total_pages or 1)
+        duration_sec = 10 + math.ceil((pages / max(settings.PRINTER_SPEED_PPM, 1)) * 60)
+        eta_mins = max(1, math.ceil(duration_sec / 60))
+        ready_time_str = (datetime.now() + timedelta(minutes=eta_mins)).strftime("%I:%M %p")
+
         success_text = (
             f"🎉 *Payment Verified via UPI!* (₹{order.total_amount:.2f})\n\n"
             f"• *Order Code:* #{order.order_code}\n"
             f"• *Pickup Token:* *{order.pickup_token}*\n"
             f"• *UTR / Ref:* `{utr}`\n"
-            f"• *Status:* QUEUED FOR PRINTING\n\n"
+            f"• *Status:* QUEUED FOR PRINTING\n"
+            f"🕒 *Estimated Pickup Time:* Ready in ~{eta_mins} mins (by approx. {ready_time_str})!\n\n"
             f"🖨️ Your print job has been sent to the printer queue!\n"
             f"Show Token *{order.pickup_token}* at the counter to collect your prints.\n\n"
             f"✨ *Need more prints?* You can send another PDF right now to place a new order instantaneously!"

@@ -168,3 +168,66 @@ async def test_youpi_webhook_http_endpoint(client, db_session, valid_pdf_6_pages
         assert data["status"] == "success"
         assert data["order_code"] == order.order_code
         assert data["pickup_token"] == order.pickup_token
+
+
+@pytest.mark.asyncio
+async def test_paid_with_customer_utr_and_pickup_timing(db_session, valid_pdf_6_pages):
+    from unittest.mock import AsyncMock, patch
+    from sqlalchemy import select
+    from backend.models.order import Order
+    from backend.models.user import User
+    from backend.services.orders.state_machine import OrderState
+    from backend.services.whatsapp.bot import handle_inbound_whatsapp_event, get_active_customer_order
+
+    phone = "919955443322"
+    with patch("backend.services.whatsapp.bot.whatsapp_service.download_media", new_callable=AsyncMock) as mock_dl, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_text_message", new_callable=AsyncMock) as mock_send, \
+         patch("backend.services.whatsapp.bot.whatsapp_service.send_image", new_callable=AsyncMock) as mock_img:
+
+        mock_dl.return_value = valid_pdf_6_pages
+        mock_send.return_value = {"status": "success"}
+        mock_img.return_value = {"status": "success"}
+
+        # 1. Customer uploads PDF
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "document",
+            "sender": phone,
+            "display_name": "UTR Customer",
+            "document": {"id": "doc_utr_test", "filename": "sample.pdf", "mime_type": "application/pdf"},
+        })
+
+        # 2. Customer confirms with DONE
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "UTR Customer",
+            "text": "DONE",
+        })
+
+        # Verify bill receipt sent with pickup timing
+        done_call_args = mock_send.call_args_list[-1]
+        assert "Estimated Pickup Time" in done_call_args.kwargs.get("text", "") or "Estimated Pickup Time" in str(done_call_args)
+
+        # 3. Customer pays on Google Pay and replies with 12-digit UTR: "PAID 429512345678"
+        await handle_inbound_whatsapp_event(db_session, {
+            "type": "text",
+            "sender": phone,
+            "display_name": "UTR Customer",
+            "text": "PAID 429512345678",
+        })
+
+        # 4. Verify payment was verified and order transitioned to PAID / QUEUED
+        user = (await db_session.execute(select(User).where(User.phone_number == phone))).scalar_one()
+        paid_order_res = await db_session.execute(
+            select(Order).where(Order.user_id == user.id)
+        )
+        paid_order = paid_order_res.scalars().first()
+        assert paid_order.status in [OrderState.PAID.value, OrderState.QUEUED.value]
+
+        # Verify confirmation message was dispatched to WhatsApp with pickup token & pickup time
+        paid_reply = mock_send.call_args_list[-1]
+        msg_text = paid_reply.kwargs.get("text", "") or str(paid_reply)
+        assert "Payment Confirmed" in msg_text
+        assert "429512345678" in msg_text
+        assert paid_order.pickup_token in msg_text
+        assert "Estimated Pickup Time" in msg_text

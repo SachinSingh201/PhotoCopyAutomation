@@ -55,7 +55,7 @@ LEGAL_TRANSITIONS: Dict[OrderState, Set[OrderState]] = {
     OrderState.PRINTED: {OrderState.READY_FOR_PICKUP},
     OrderState.READY_FOR_PICKUP: {OrderState.COLLECTED, OrderState.EXPIRED},
     OrderState.COLLECTED: {OrderState.CLEANUP_PENDING},
-    OrderState.EXPIRED: {OrderState.CLEANUP_PENDING},
+    OrderState.EXPIRED: {OrderState.CLEANUP_PENDING, OrderState.PAID},
     OrderState.CANCELLED: {OrderState.CLEANUP_PENDING},
     OrderState.CLEANUP_PENDING: {OrderState.CLEANED},
     OrderState.CLEANED: set(),

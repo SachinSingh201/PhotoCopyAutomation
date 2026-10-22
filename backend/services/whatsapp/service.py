@@ -440,9 +440,20 @@ class OpenWAAdapter:
 
         headers = self._get_headers()
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 res = await client.get(media_url, headers=headers)
                 if res.status_code == 200:
+                    content_type = res.headers.get("content-type", "").lower()
+                    if "application/json" in content_type:
+                        try:
+                            json_data = res.json()
+                            raw_b64 = json_data.get("data") or json_data.get("base64")
+                            if raw_b64:
+                                if "," in raw_b64:
+                                    raw_b64 = raw_b64.split(",", 1)[1]
+                                return base64.b64decode(raw_b64)
+                        except Exception as je:
+                            logger.warning(f"Error parsing JSON media response: {je}")
                     return res.content
         except Exception as e:
             logger.warning(f"Failed to fetch media from OpenWA {media_url}: {e}")
