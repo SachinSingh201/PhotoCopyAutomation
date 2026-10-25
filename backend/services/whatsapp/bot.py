@@ -387,7 +387,11 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="CUSTOMER")
         elif order.status == OrderState.FILES_UPLOADING.value:
             await transition_order(session, order, OrderState.FILES_UPLOADED, actor_type="CUSTOMER")
-        elif order.status == OrderState.AWAITING_CONFIRMATION.value:
+        elif order.status in [
+            OrderState.AWAITING_CONFIRMATION.value,
+            OrderState.CONFIGURED.value,
+            OrderState.PRICE_CALCULATED.value,
+        ]:
             await transition_order(session, order, OrderState.CONFIGURATION_PENDING, actor_type="CUSTOMER")
         await session.commit()
 

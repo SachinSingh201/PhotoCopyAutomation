@@ -19,17 +19,23 @@ An enterprise-grade, fully autonomous document printing and photocopy management
 - **NLP / LLM Intent Engine**: Parses unstructured customer requirements into structured, strictly validated schemas without touching database state.
 - **Database (SQLAlchemy + Alembic)**: Authoritative, ACID-compliant source of truth for orders, files, payments, audit trails, and shop schedules.
 - **Local Print Agent**: Secure daemon running on the physical print shop computer that polls authorized jobs and drives hardware printers.
-- **Admin Dashboard**: Real-time web-based command center for telemetry, order management, printer fleet monitoring, schedule control, and emergency st## ✨ Features
+- **Admin Dashboard**: Real-time web-based command center for telemetry, order management, printer fleet monitoring, schedule control, and emergency stop.
+
+---
+
+## ✨ Features
 
 - 📱 **Dual WhatsApp Transport Support**: Native integration with both **Meta WhatsApp Cloud API** and **OpenWA** (`whatsapp-web.js` self-hosted bridge) with automatic engine detection.
-- 📄 **Quiet Multi-File Document Bundling**: Upload up to **10 PDF files per order** (up to 50 MB each). The bot silently registers files and page counts without spamming bills or QR codes for each upload.
+- 📁 **Universal Multi-Format Document Support**: Upload **PDF, Word (.docx, .doc), PowerPoint (.pptx, .ppt), Excel (.xlsx, .xls), Images (.jpg, .jpeg, .png, .webp, .bmp, .tiff), and Text (.txt, .csv)**. All formats are automatically converted to standardized printable PDFs on the fly.
+- 📄 **Quiet Multi-File Document Ingestion**: Upload up to **10 files per order** (up to 50 MB each). The bot acknowledges each file upload immediately with a concise one-line status (`📄 Total X file(s) received`), then automatically delivers a single consolidated summary and options menu once you stop sending files.
+- 🖨️ **Per-File & Global Copies**: Full support for requested copy counts (`4 copies of 1st document and single side other`, `file 1 - 4 copies \n rest file single cop`, `2 copies of all`). Each copy is priced accurately and spooled to physical printers.
 - 🧾 **Single-Receipt Confirmation**: When all documents are sent, customer replies `DONE` or `CONFIRM`. The system outputs a **single consolidated receipt** with full file breakdown, total pricing, and a payment QR code.
 - ⏱️ **10-Minute Payment Timeout**: After confirmation, the customer has **10 minutes** to pay. If unpaid within 10 minutes, the order is automatically cancelled, private files are permanently deleted from disk, and the user is alerted.
-- ⚡ **Instant Concurrent Reordering**: Customers can place multiple orders simultaneously. As soon as an order is confirmed or paid, sending another PDF creates a fresh separate order immediately with its own unique pickup token.
+- ⚡ **Instant Concurrent Reordering**: Customers can place multiple orders simultaneously. As soon as an order is confirmed or paid, sending another document creates a fresh separate order immediately with its own unique pickup token.
 - ❌ **Instant Order Cancellation**: Customers can reply `CANCEL` anytime before physical printing to abort an order and discard draft files.
-- 💳 **Self-Hosted YouPI-PG & Instant UTR Verification**: Customers can reply `PAID <12-digit UTR>` (e.g. `PAID 429512345678`) or let YouPI-PG auto-confirm via bank SMS observation, transitioning orders directly to `PAID` → `QUEUED` with zero platform fees.
-- 🧠 **Smart NLP Interpretation**: Natural phrasing like *"print 3 copies of pages 1 to 10 in b&w both sides"* converted to deterministic order items.
-- 💰 **Deterministic Pricing Engine**: Flat base fees, page-range normalization, B&W / Color rates, and Simplex / Duplex configurations.
+- 💳 **Self-Hosted YouPI-PG & Counter QR Precedence**: Zero-fee, self-hosted payment gateway (`YouPI-PG`) with dynamic checkout, live SMS/push notification observation via Play Store **MacroDroid**, custom counter paper standee QR precedence, or direct UPI/Razorpay verification.
+- 🧠 **Smart NLP Interpretation**: Natural phrasing like *"4 copies of 1st document and single side other"*, *"pages 1-5 single, 6-10 double"*, *"2 copies of all"* converted into deterministic print rules.
+- 💰 **Deterministic Pricing Engine**: Flat base fees, page-range normalization, copies multiplication, B&W / Color rates, and Simplex / Duplex configurations.
 - 🕒 **Store Scheduling & Smart ETAs**: Working hours enforcement, holiday exceptions, after-hours queuing, and dynamic queue wait-time estimation.
 - 🖨️ **Autonomous Local Print Agent**: Long-polling daemon with automated printer discovery, spooling, speed benchmarking, and completion verification.
 - 📊 **Modern Admin Command Center**: Real-time KPI metrics, order table with filters/search, manual payment re-verification, custom QR upload, and emergency killswitch.
@@ -43,8 +49,8 @@ Customers interacting with the WhatsApp bot can use the following interactive co
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
-| `[Send PDF]` | Uploads a PDF file. Adds to existing draft without spamming individual bills. | *Uploads document.pdf* |
-| `[Instructions]` | Natural language print options (duplex, copies, color, page ranges). | *"Double sided, 2 copies"* |
+| `[Send Document]` | Uploads PDF, Word, PowerPoint, Excel, Image, or Text. Acknowledged with concise running count. | *Uploads notes.docx or doc.pdf* |
+| `[Instructions]` | Natural language print options (copies, duplex, color, partial page ranges). | *"4 copies of 1st document and single side other"* |
 | `DONE` / `CONFIRM` / `PAY` | Confirms all files are uploaded; generates single receipt + payment QR with 10-minute timer. | `DONE` or `CONFIRM` |
 | `CANCEL` / `ABORT` | Cancels draft or pending order and immediately purges uploaded files from disk. | `CANCEL` |
 | `PAID <12-digit UTR>` | Instantly verifies UPI transaction reference / UTR, queues print job, and sends pickup timing. | `PAID 429512345678` |
@@ -59,11 +65,12 @@ Customers interacting with the WhatsApp bot can use the following interactive co
 | Parameter | Setting | Description |
 | :--- | :--- | :--- |
 | **Max Files per Order** | `10 files` | Configured via `MAX_FILES_PER_ORDER`. Additional files are rejected gracefully. |
+| **Supported File Types** | `PDF, DOCX, PPTX, XLSX, JPG, PNG, TXT` | Standardized to printable PDF automatically via `converter.py`. |
 | **Max File Size** | `50 MB` | Configured via `MAX_FILE_SIZE_BYTES`. Corrupt or oversized files are rejected. |
 | **Concurrent Orders** | `Unlimited` | Customers can run multiple orders simultaneously with distinct pickup tokens. |
-| **Reorder Timing** | `Instantaneous` | Sending a PDF after confirming/paying automatically starts a new separate order. |
+| **Reorder Timing** | `Instantaneous` | Sending a document after confirming/paying automatically starts a new separate order. |
 | **Unpaid Order Hold** | `10 minutes` | Configured via `ORDER_PAYMENT_TIMEOUT_MINUTES`. Expired files are auto-purged from disk. |
-| **Payment Gateways** | `YouPI-PG / UPI / Razorpay` | Zero-fee self-hosted YouPI-PG, instant 12-digit UTR verification, or Razorpay checkout. |
+| **Payment Gateways** | `YouPI-PG / UPI / MacroDroid / Razorpay` | Zero-fee self-hosted YouPI-PG, paper standee QR observer, or Razorpay checkout. |
 
 ---
 
@@ -119,7 +126,20 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 - **API Documentation (Swagger)**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **WhatsApp Webhook Endpoint**: `http://127.0.0.1:8000/webhooks/whatsapp`
 
-### 5. Launch OpenWA Bridge (Optional, for whatsapp-web.js engine)
+### 5. Launch YouPI-PG Payment Gateway (Optional, for zero-fee payments)
+
+```bash
+cd YouPI-PG
+npm install
+npm run dev
+```
+
+- **Process Control Center**: `http://localhost:8090`
+- **Merchant Panel**: `http://localhost:6001`
+- **Payment Core REST API**: `http://localhost:6100`
+- **Customer Checkout Portal**: `http://localhost:7000/checkout/:id`
+
+### 6. Launch OpenWA Bridge (Optional, for whatsapp-web.js engine)
 
 ```bash
 cd openwa-bridge
@@ -128,7 +148,7 @@ node index.js
 ```
 Scan the QR code displayed in the terminal with WhatsApp to link your number.
 
-### 6. Launch the Local Print Agent
+### 7. Launch the Local Print Agent
 
 On the computer connected to your physical printers:
 
@@ -140,7 +160,7 @@ python print_agent/agent.py
 
 ## 🧪 Running Tests
 
-Run the full automated test suite (101 unit and integration tests):
+Run the full automated test suite (120 unit and integration tests):
 
 ```bash
 pytest tests/ -v

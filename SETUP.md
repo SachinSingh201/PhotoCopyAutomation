@@ -93,9 +93,10 @@ A comprehensive, production-ready guide to set up the **Photocopy & Print Automa
 
 Ensure you have installed:
 - **Python**: Version `3.11` or higher (`python --version`)
+- **Node.js**: Version `18.0` or higher (`node -v`, required for `YouPI-PG` and `openwa-bridge`)
 - **Git**: For version control (`git --version`)
 - **PostgreSQL** (Optional for production; SQLite is included out of the box for dev)
-- **Poppler / PyMuPDF**: For PDF page rendering and physical printing
+- **PyMuPDF / Pillow / ReportLab / python-docx / openpyxl / python-pptx**: Included in `requirements.txt` for universal document conversion (Word, PPTX, Excel, Images, Text to PDF)
 - **ngrok** or **Cloudflare Tunnel**: For exposing your local port `8000` to the internet during development
 
 ---
@@ -121,6 +122,7 @@ cp .env.example .env
 | `DATABASE_URL` | Async database connection URL | `sqlite+aiosqlite:///./whatsapp_print.db` (Dev) or `postgresql+asyncpg://user:pass@localhost:5432/printdb` (Prod) |
 | `DATABASE_SYNC_URL` | Sync database connection (Alembic) | `sqlite:///./whatsapp_print.db` (Dev) or `postgresql://user:pass@localhost:5432/printdb` (Prod) |
 | `STORAGE_ROOT` | Private document storage directory | `./storage/private` |
+| `WHATSAPP_ENGINE` | WhatsApp transport provider engine | `openwa` or `meta` |
 | `WHATSAPP_PHONE_NUMBER_ID` | Meta WhatsApp Cloud Phone Number ID | Found in Meta App Dashboard |
 | `WHATSAPP_TOKEN` | System User Access Token from Meta | Permanent Bearer token from Meta Developer Portal |
 | `WHATSAPP_VERIFY_TOKEN` | Webhook verification challenge token | A secure string e.g. `printshop_webhook_secret_verify_2026` |
@@ -128,15 +130,22 @@ cp .env.example .env
 | `LLM_PROVIDER` | NLP Intent Parser provider | `mock` or `gemini` or `openai` |
 | `LLM_API_KEY` | API Key for LLM provider | `AIzaSy...` (if using Gemini) |
 | `LLM_MODEL` | NLP model identifier | `gemini-1.5-flash` |
-| `PAYMENT_PROVIDER` | Payment gateway | `mock` or `razorpay` |
+| `PAYMENT_PROVIDER` | Payment gateway engine | `youpi`, `razorpay`, `upi`, or `mock` |
+| `YOUPI_API_BASE_URL` | YouPI-PG Payment Core REST API | `http://localhost:6100` |
+| `YOUPI_API_KEY` | YouPI-PG API Key | `yp_sec_live_default_printshop_2026` |
+| `SHOP_UPI_ID` | Shop's UPI VPA for payments | `shop@okaxis` or `merchant@upi` |
+| `SHOP_NAME` | Display name on payment screens & receipts | `Print Express Hub` |
 | `PAYMENT_KEY_ID` | Razorpay Key ID | `rzp_test_xxxxxx` |
 | `PAYMENT_KEY_SECRET` | Razorpay Key Secret | `secret_xxxxxx` |
 | `PAYMENT_WEBHOOK_SECRET` | Razorpay Webhook Signature Secret | `webhook_secret_xxxxxx` |
-| `PRICE_FILE_BASE_CHARGE` | Flat base fee per order (INR) | `5.0` |
+| `PRICE_FILE_BASE_CHARGE` | Flat base fee per file (INR) | `5.0` |
 | `PRICE_BW_SINGLE` | Price per page B&W single-sided | `2.0` |
 | `PRICE_BW_DOUBLE` | Price per sheet B&W double-sided | `3.0` |
 | `PRICE_COLOR_SINGLE` | Price per page Color single-sided | `10.0` |
 | `PRICE_COLOR_DOUBLE` | Price per sheet Color double-sided | `15.0` |
+| `MAX_FILES_PER_ORDER` | Maximum files per order | `10` |
+| `MAX_FILE_SIZE_BYTES` | Maximum size per document | `52428800` (50 MB) |
+| `ORDER_PAYMENT_TIMEOUT_MINUTES` | Payment hold timeout window | `10` |
 | `CURRENCY` | Currency code | `INR` |
 | `PRINT_AGENT_TOKEN` | Shared secret token for Print Agent auth | `print_agent_secret_token_123` |
 | `PRINT_AGENT_ID` | Identifier of this print agent | `agent-local-01` |
@@ -296,7 +305,42 @@ The dashboard provides a real-time command center:
 - Active printer fleet control (Speed, paper status, toggle online/offline)
 - Emergency Master Kill Switch & Auto-recovery mode toggle
 
-### 6.4 Run Print Agent Daemon
+### 6.4 Launch YouPI-PG Payment Gateway (Optional, for zero-fee payments)
+YouPI-PG provides an autonomous, self-hosted payment gateway with real-time checkout, observer bridges, and merchant analytics:
+
+```bash
+# In a new terminal, navigate to YouPI-PG directory
+cd c:\Users\anshu\Desktop\PhotocopyAutomation\YouPI-PG
+
+# Install Node.js dependencies
+npm install
+
+# Start the supervisor and all modular services
+npm run dev
+```
+
+#### YouPI-PG Service Ports & Dashboards:
+| Service | URL / Port | Purpose |
+| :--- | :--- | :--- |
+| **Process Control Center** | `http://localhost:8090` | Live process supervisor & service status |
+| **Merchant Panel & Hub** | `http://localhost:6001` | Merchant dashboard, transactions & QR settings |
+| **Payment Core REST API** | `http://localhost:6100` | Order creation, webhook triggers & status polling |
+| **Customer Checkout Portal** | `http://localhost:7000/checkout/:id` | Mobile-optimized UPI checkout page |
+| **SMS / Push Observer** | `http://localhost:6002` | Local push notification ingestion bridge |
+| **Gmail Observer** | `http://localhost:6003` | Automated bank email receipt parser |
+| **Showcase Demo Store** | `http://localhost:5000` | Interactive test storefront |
+
+### 6.5 Launch OpenWA Bridge (Optional, for whatsapp-web.js engine)
+If you are using a self-hosted WhatsApp number without the Meta Cloud API:
+
+```bash
+cd c:\Users\anshu\Desktop\PhotocopyAutomation\openwa-bridge
+npm install
+node index.js
+```
+Scan the QR code displayed in the terminal with your WhatsApp mobile app to connect the session.
+
+### 6.6 Run Print Agent Daemon
 The Print Agent is the bridge between the cloud backend and the physical shop printers. Run it on the shop's computer:
 
 ```bash
@@ -310,7 +354,8 @@ The agent automatically:
 - Registers with the backend via `PRINT_AGENT_TOKEN`
 - Heartbeats every 10 seconds
 - Polls for queued `PAID` print jobs
-- Spools files to local printers and confirms execution back to the server
+- Spools files with the exact requested copy counts (`copies`) to local printers
+- Confirms successful execution back to the server
 
 ---
 
@@ -359,7 +404,7 @@ curl -X POST "http://127.0.0.1:8000/webhooks/whatsapp" \
                   "id": "wamid.HBgMOTE5ODc2NTQzMjEwFQIAEhgWM0VCMDEyMzQ1Njc4OTBBQkNERUYwMQ==",
                   "timestamp": "1711200000",
                   "text": {
-                    "body": "Hi, please print 2 copies black and white, double sided"
+                    "body": "4 copies of 1 st document and single side other"
                   },
                   "type": "text"
                 }
@@ -374,10 +419,16 @@ curl -X POST "http://127.0.0.1:8000/webhooks/whatsapp" \
 ```
 **Expected Response:** `{"status": "received", "event_count": 1}`
 
+Other supported NLP examples:
+- `"file 1 - 4 copies \n rest file single cop"`
+- `"no 4 copies of first document and single copies of all rest"`
+- `"pages 1-5 single sided, pages 6-10 double sided, 2 copies"`
+- `"2 copies of all, back to back"`
+
 ---
 
-### 7.3 Inbound WhatsApp Document (PDF) Upload Test
-Simulate a customer uploading a PDF document:
+### 7.3 Inbound WhatsApp Document Upload Test (Multi-Format)
+Simulate a customer uploading a document (supports `.pdf`, `.docx`, `.pptx`, `.xlsx`, `.jpg`, `.png`, `.txt`):
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/webhooks/whatsapp" \
@@ -557,7 +608,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/agent/jobs/JOB_ID_HERE/complete" \
 
 ### 7.7 Running Automated Test Suite
 
-Run all unit, integration, and security tests to verify application integrity:
+Run the full automated test suite (120 unit, integration, and security tests) to verify application integrity:
 
 ```bash
 pytest tests/ -v
@@ -803,6 +854,33 @@ curl -X GET "http://127.0.0.1:8000/api/v1/payments/phone-status"
 curl -X GET "http://127.0.0.1:8000/api/v1/admin/payments/setup-hub" \
   -H "X-Admin-Secret: 6396"
 ```
+
+---
+
+### 9.6 Case 3: YouPI-PG Gateway (Zero-Fee Self-Hosted UPI Orchestrator)
+
+#### Overview:
+YouPI-PG is an autonomous, self-hosted payment gateway included in `./YouPI-PG`. It operates with zero transaction fees and zero third-party dependencies:
+1. **Dynamic Customer Checkout**: Customers scanning payment links or QR codes are directed to `http://localhost:7000/checkout/:id` with dynamic UPI deep-links (GPay, PhonePe, Paytm, BHIM, CRED).
+2. **Automated Push Ingestion**: Receives payment notifications from MacroDroid on port `6002` or via the FastAPI endpoint at `/api/v1/payments/macrodroid/notification`.
+3. **Gmail Payment Observer**: Automatically monitors and parses incoming bank credit confirmation emails on port `6003`.
+4. **Merchant Panel & Analytics**: Real-time management dashboard at `http://localhost:6001`.
+5. **Supervisor Control Center**: Single-command runner managing all services at `http://localhost:8090`.
+
+#### Running YouPI-PG:
+```bash
+cd YouPI-PG
+npm install
+npm run dev
+```
+
+#### Configuration (.env):
+```ini
+PAYMENT_PROVIDER=youpi
+YOUPI_API_BASE_URL=http://localhost:6100
+YOUPI_API_KEY=yp_sec_live_default_printshop_2026
+```
+Orders automatically generate YouPI checkout links and verify payments in real-time.
 
 ---
 *Photocopy Automation System — Developed for production-grade, autonomous document printing.*

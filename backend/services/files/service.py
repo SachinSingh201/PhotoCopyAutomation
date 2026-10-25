@@ -74,12 +74,15 @@ async def process_and_save_order_file(
     Validates PDF, assigns upload sequence, calculates hash, writes to isolated private storage,
     creates default PrintConfiguration, and updates Order state.
     """
-    # Verify order state allows file uploading
+    # Verify order state allows file uploading (all draft states before payment confirmation)
     if order.status not in [
         OrderState.CREATED.value,
         OrderState.FILES_UPLOADING.value,
         OrderState.FILES_UPLOADED.value,
         OrderState.CONFIGURATION_PENDING.value,
+        OrderState.CONFIGURED.value,
+        OrderState.PRICE_CALCULATED.value,
+        OrderState.AWAITING_CONFIRMATION.value,
     ]:
         raise AppException(
             code=ErrorCode.ORDER_LOCKED,
