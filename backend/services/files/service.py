@@ -14,6 +14,7 @@ from backend.core.security import sanitize_filename
 from backend.models.configuration import PrintConfiguration
 from backend.models.file import OrderFile
 from backend.models.order import Order
+from backend.services.files.converter import convert_and_validate_document
 from backend.services.orders.state_machine import OrderState, transition_order
 
 
@@ -103,24 +104,28 @@ async def process_and_save_order_file(
             message=f"Maximum of {settings.MAX_FILES_PER_ORDER} files per order reached.",
         )
 
-    # Validate PDF and extract pages
-    page_count = extract_pdf_page_count_and_validate(file_bytes)
+    # Validate document (PDF, Word, PPT, Excel, Images, Text) and convert to printable PDF
+    converted_pdf_bytes, page_count, detected_format = convert_and_validate_document(
+        file_bytes=file_bytes,
+        original_filename=original_filename,
+        mime_type=mime_type,
+    )
 
-    # Calculate SHA256
+    # Calculate SHA256 of original file upload
     file_hash = hashlib.sha256(file_bytes).hexdigest()
 
     # Determine upload sequence (1-indexed)
     upload_sequence = current_count + 1
     file_id = str(uuid.uuid4())
 
-    # Write file to isolated private storage
+    # Write converted printable PDF to isolated private storage
     order_dir = settings.storage_path / "orders" / order.id
     order_dir.mkdir(parents=True, exist_ok=True)
     storage_filename = f"{file_id}.pdf"
     storage_path = str(order_dir / storage_filename)
 
     with open(storage_path, "wb") as f:
-        f.write(file_bytes)
+        f.write(converted_pdf_bytes)
 
     # Create OrderFile model
     now = datetime.now(timezone.utc)
@@ -144,6 +149,7 @@ async def process_and_save_order_file(
     default_config = PrintConfiguration(
         order_id=order.id,
         file_id=file_id,
+        copies=1,
         color_mode="bw",
         default_sides="single",
         rules_json="[]",

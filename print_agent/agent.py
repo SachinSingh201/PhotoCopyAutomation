@@ -80,6 +80,7 @@ class PrintAgentDaemon:
                 success = await printer_driver.print_file(
                     file_path=f["storage_path"],
                     page_count=f["page_count"],
+                    copies=f.get("copies", 1),
                     color_mode=f["color_mode"],
                     default_sides=f["default_sides"],
                     rules_json=f["rules_json"],
@@ -155,6 +156,7 @@ class PrintAgentDaemon:
                     success = await printer_driver.print_file(
                         file_path=f["storage_path"],
                         page_count=f["page_count"],
+                        copies=f.get("copies", 1),
                         color_mode=f["color_mode"],
                         default_sides=f["default_sides"],
                         rules_json=f["rules_json"],

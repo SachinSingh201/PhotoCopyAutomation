@@ -73,8 +73,12 @@ async def calculate_order_pricing_snapshot(
             custom_rules=rules,
         )
 
-        file_cost = calculate_file_price(breakdown)
-        total_pages += f.page_count
+        copies = getattr(config, "copies", 1) if config else 1
+        copies = max(1, copies or 1)
+
+        single_copy_cost = calculate_file_price(breakdown)
+        file_cost = round(single_copy_cost * copies, 2)
+        total_pages += (f.page_count * copies)
         total_printing_charge += file_cost
 
         details.append(
@@ -83,10 +87,11 @@ async def calculate_order_pricing_snapshot(
                 upload_sequence=f.upload_sequence,
                 filename=f.original_filename,
                 page_count=f.page_count,
-                bw_single_pages=breakdown["bw_single"],
-                bw_double_pages=breakdown["bw_double"],
-                color_single_pages=breakdown["color_single"],
-                color_double_pages=breakdown["color_double"],
+                copies=copies,
+                bw_single_pages=breakdown["bw_single"] * copies,
+                bw_double_pages=breakdown["bw_double"] * copies,
+                color_single_pages=breakdown["color_single"] * copies,
+                color_double_pages=breakdown["color_double"] * copies,
                 file_cost=file_cost,
             )
         )

@@ -7,6 +7,7 @@ class FilePricingDetail(BaseModel):
     upload_sequence: int
     filename: str
     page_count: int
+    copies: int = 1
     bw_single_pages: int = 0
     bw_double_pages: int = 0
     color_single_pages: int = 0

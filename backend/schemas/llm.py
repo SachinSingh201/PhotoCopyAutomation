@@ -11,6 +11,7 @@ class PageRule(BaseModel):
 
 class FilePrintRule(BaseModel):
     file_reference: int = Field(ge=1, description="1-based file upload sequence index (e.g. 1 for File 1)")
+    copies: Optional[int] = Field(default=1, ge=1, description="Number of copies to print")
     color_mode: Optional[Literal["bw", "color"]] = Field(default="bw", description="Overall file color mode")
     default_sides: Optional[Literal["single", "double"]] = Field(default="single", description="Default side configuration")
     rules: List[PageRule] = Field(default_factory=list, description="Specific page range rules")

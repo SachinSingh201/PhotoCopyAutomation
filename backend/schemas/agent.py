@@ -29,6 +29,7 @@ class PrintJobFileDetail(BaseModel):
     filename: str
     storage_path: str
     page_count: int
+    copies: int = 1
     color_mode: str
     default_sides: str
     rules_json: str

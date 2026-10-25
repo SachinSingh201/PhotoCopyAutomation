@@ -74,6 +74,14 @@ class MetaCloudAdapter:
                             "filename": doc.get("filename", "document.pdf"),
                             "mime_type": doc.get("mime_type", "application/pdf"),
                         }
+                    elif msg_type == "image":
+                        img = msg.get("image", {})
+                        event["type"] = "document"
+                        event["document"] = {
+                            "id": img.get("id"),
+                            "filename": f"image_{str(msg_id)[-6:]}.jpg",
+                            "mime_type": img.get("mime_type", "image/jpeg"),
+                        }
                     elif msg_type == "interactive":
                         interactive = msg.get("interactive", {})
                         btn_reply = interactive.get("button_reply", {})
@@ -219,7 +227,10 @@ class OpenWAAdapter:
         body = data.get("body") or data.get("caption") or data.get("text") or ""
 
         # Map OpenWA message type to system unified types ('text', 'document', 'interactive')
-        if msg_type_raw in ["document", "file"] or (has_media and ("pdf" in str(data.get("mimetype", "")).lower() or body.lower().endswith(".pdf"))):
+        is_media_doc = msg_type_raw in ["document", "file", "image"] or (
+            has_media and not msg_type_raw.startswith("audio") and not msg_type_raw.startswith("ptt")
+        )
+        if is_media_doc:
             unified_type = "document"
         elif msg_type_raw in ["buttons_response", "template_button_reply", "interactive", "list_response"]:
             unified_type = "interactive"
@@ -241,8 +252,17 @@ class OpenWAAdapter:
         if unified_type == "text":
             event["text"] = body
         elif unified_type == "document":
-            filename = data.get("filename") or (body if body.lower().endswith(".pdf") else "document.pdf")
-            mime_type = data.get("mimetype") or data.get("mime_type") or "application/pdf"
+            fallback_ext = ".jpg" if msg_type_raw == "image" else ".pdf"
+            filename = data.get("filename")
+            if not filename:
+                for ext in [".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".jpg", ".jpeg", ".png", ".webp"]:
+                    if body.lower().endswith(ext):
+                        filename = body
+                        break
+            if not filename:
+                filename = f"file_{str(msg_id)[-6:]}{fallback_ext}"
+
+            mime_type = data.get("mimetype") or data.get("mime_type") or ("image/jpeg" if msg_type_raw == "image" else "application/pdf")
             media_url = data.get("mediaUrl")
             if not media_url and msg_id:
                 # Standard OpenWA media retrieval URL

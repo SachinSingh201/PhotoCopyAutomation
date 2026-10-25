@@ -264,6 +264,7 @@ async def claim_next_job(
         if f.status == "DELETED":
             continue
         config = f.configuration
+        copies = getattr(config, "copies", 1) if config else 1
         file_details.append(
             PrintJobFileDetail(
                 file_id=f.id,
@@ -271,6 +272,7 @@ async def claim_next_job(
                 filename=f.original_filename,
                 storage_path=f.storage_path,
                 page_count=f.page_count,
+                copies=copies or 1,
                 color_mode=config.color_mode if config else "bw",
                 default_sides=config.default_sides if config else "single",
                 rules_json=config.rules_json if config else "[]",

@@ -101,18 +101,20 @@ class PrinterDriver:
         self,
         file_path: str,
         page_count: int,
-        color_mode: str,
-        default_sides: str,
-        rules_json: str,
+        copies: int = 1,
+        color_mode: str = "bw",
+        default_sides: str = "single",
+        rules_json: str = "[]",
         printer_name: Optional[str] = None,
     ) -> bool:
         target_printer = printer_name or "Default Printer"
+        copies = max(1, copies or 1)
         logger.info(
-            f"Spooling file: {file_path} -> [{target_printer}] (Pages: {page_count}, Mode: {color_mode}, Sides: {default_sides})"
+            f"Spooling file: {file_path} -> [{target_printer}] (Pages: {page_count}, Copies: {copies}, Mode: {color_mode}, Sides: {default_sides})"
         )
         # Simulate physical spooling
         await asyncio.sleep(agent_settings.MOCK_PRINT_EXECUTION_TIME_SECONDS)
-        logger.info(f"Successfully spooled {file_path} to [{target_printer}].")
+        logger.info(f"Successfully spooled {file_path} ({copies} copies) to [{target_printer}].")
         return True
 
 

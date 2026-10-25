@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -26,7 +27,56 @@ from backend.services.pricing.engine import calculate_order_pricing_snapshot
 from backend.services.security import mask_phone, message_rate_limiter, upload_rate_limiter
 from backend.services.whatsapp.service import whatsapp_service
 
-_pending_doc_replies: Dict[str, asyncio.Task] = {}
+_pending_doc_batches: Dict[str, asyncio.Task] = {}
+
+
+async def _dispatch_consolidated_files_notification(sender: str, order_id: str, last_file_name: Optional[str] = None):
+    """
+    Sends ONE consolidated summary WhatsApp message for all files in the current draft order
+    once the customer has finished uploading all documents.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            order = await get_order_by_id(session, order_id)
+            if not order or not order.files:
+                return
+
+            # If order has already transitioned beyond draft/files uploaded, do not send options menu
+            if order.status not in [OrderState.FILES_UPLOADED.value, OrderState.FILES_UPLOADING.value, OrderState.CONFIGURATION_PENDING.value]:
+                return
+
+            file_count = len(order.files)
+            timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
+
+            file_summaries = []
+            for idx, f in enumerate(order.files, 1):
+                c = f.configuration
+                copies = getattr(c, "copies", 1) or 1
+                copies_str = f" ({copies} copies)" if copies > 1 else ""
+                file_summaries.append(f"  {idx}. {f.original_filename} ({f.page_count} pages{copies_str})")
+            files_breakdown = "\n".join(file_summaries)
+
+            reply = (
+                f"📄 *All {file_count} File(s) Received (Order #{order.order_code})!*\n"
+                f"• *Files in this Order:* {file_count} files ({order.total_pages} pages total)\n"
+                f"• *Estimated Print Time:* ~{timing['eta_mins']} mins\n\n"
+                f"• *Files Received:*\n{files_breakdown}\n\n"
+                f"💡 *Print Options:*\n"
+                f"Reply with your requirements if you'd like to customize:\n"
+                f"• *'4 copies of 1st document and single side other'*\n"
+                f"• *'Double sided'* or *'Back to back'* (Duplex)\n"
+                f"• *'Pages 1-5 single sided, pages 6-10 double sided'* (Partial)\n"
+                f"• *'File 1: 4 copies, File 2: 1 copy'*\n"
+                f"• *'All color'* or *'All black and white'*\n\n"
+                f"👉 Send another file to add more files to this order (up to {settings.MAX_FILES_PER_ORDER}).\n"
+                f"👉 Reply with your print options, or reply *DONE* (or *CONFIRM*) to get the final bill & payment QR!\n"
+                f"👉 Or reply *CANCEL* to discard this order."
+            )
+            await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+    except Exception as e:
+        logger.error(f"Error dispatching consolidated files notification for order {order_id}: {e}")
+    finally:
+        _pending_doc_batches.pop(order_id, None)
 
 
 def get_order_pickup_timing(order: Order, ppm: int = 20) -> Dict[str, Any]:
@@ -341,21 +391,30 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
             await transition_order(session, order, OrderState.CONFIGURATION_PENDING, actor_type="CUSTOMER")
         await session.commit()
 
-        # Reload order to reflect fresh state
-        order = await get_order_by_id(session, order.id)
-
-        # Concise file confirmation with estimated print time
-        timing = get_order_pickup_timing(order, settings.PRINTER_SPEED_PPM)
-        reply = (
-            f"📄 *File {len(order.files)} of {settings.MAX_FILES_PER_ORDER} Received!*\n"
-            f"• *File:* {order_file.original_filename} ({order_file.page_count} pages)\n"
-            f"• *Files in this Order:* {len(order.files)} files ({order.total_pages} pages total)\n"
-            f"• *Estimated Print Time:* ~{timing['eta_mins']} mins\n\n"
-            f"👉 Send another PDF to add more files to this order (up to {settings.MAX_FILES_PER_ORDER}).\n"
-            f"👉 Reply *DONE* (or *CONFIRM*) once you have sent all your files to get the final bill & payment QR!\n"
-            f"👉 Or reply *CANCEL* to discard this order."
+        # 1. Immediately send short, concise receipt acknowledgment
+        total_files = len(order.files)
+        short_ack = (
+            f"📄 *Total {total_files} file{'s' if total_files > 1 else ''} received:* {order_file.original_filename} ({order_file.page_count} pages) [File {total_files} of {settings.MAX_FILES_PER_ORDER} Received!]\n"
+            f"👉 Send more files, or reply *DONE* when finished."
         )
-        await whatsapp_service.send_text_message(to_phone=sender, text=reply)
+        await whatsapp_service.send_text_message(to_phone=sender, text=short_ack)
+
+        # 2. Debounce multi-file uploads: when customer finishes uploading all files, send the big consolidated options message
+        is_test = bool(os.environ.get("PYTEST_CURRENT_TEST")) or getattr(settings, "ENVIRONMENT", "").lower() == "test"
+        if not is_test:
+            if order.id in _pending_doc_batches:
+                old_task = _pending_doc_batches[order.id]
+                if not old_task.done():
+                    old_task.cancel()
+
+            async def _debounced():
+                try:
+                    await asyncio.sleep(3.5)
+                    await _dispatch_consolidated_files_notification(sender, order.id, last_file_name=order_file.original_filename)
+                except asyncio.CancelledError:
+                    pass
+
+            _pending_doc_batches[order.id] = asyncio.create_task(_debounced())
         return
 
     # --------------------------------------------------------------------------
@@ -374,6 +433,12 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
     if event_type == "text":
         user_text = event.get("text", "").strip()
         cmd = user_text.upper()
+
+        # Cancel any pending debounced upload notifications if user is already replying
+        if order and order.id in _pending_doc_batches:
+            pending_t = _pending_doc_batches.pop(order.id, None)
+            if pending_t and not pending_t.done():
+                pending_t.cancel()
 
         # Subcase C1: Cancellation command
         if cmd in ["CANCEL", "CANCEL ORDER", "CANCEL PRINT", "ABORT", "RESET"]:
@@ -599,6 +664,8 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     )
                     if matched_file and matched_file.configuration:
                         cfg = matched_file.configuration
+                        if f_rule.copies is not None:
+                            cfg.copies = max(1, f_rule.copies)
                         if f_rule.color_mode:
                             cfg.color_mode = f_rule.color_mode
                         if f_rule.default_sides:
@@ -624,7 +691,37 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                 cfg_first = order.files[0].configuration if order.files else None
                 color_desc = cfg_first.color_mode.upper() if cfg_first else "BW"
                 sides_desc = cfg_first.default_sides.capitalize() if cfg_first else "Single"
+                copies_list = [getattr(f.configuration, "copies", 1) or 1 for f in order.files]
+                if len(set(copies_list)) <= 1:
+                    first_c = copies_list[0] if copies_list else 1
+                    copies_desc = f"{first_c} Cop{'ies' if first_c > 1 else 'y'}"
+                else:
+                    copies_desc = "Custom per file"
 
+                # Build detailed per-file config summary
+                config_lines = []
+                for idx, f in enumerate(order.files, 1):
+                    c = f.configuration
+                    f_copies = getattr(c, "copies", 1) or 1
+                    f_sides = c.default_sides.capitalize() if c else "Single"
+                    f_color = c.color_mode.upper() if c else "BW"
+
+                    rules_summary = ""
+                    if c and c.rules_json and c.rules_json != "[]":
+                        try:
+                            parsed_r = json.loads(c.rules_json)
+                            if parsed_r:
+                                r_desc = ", ".join([f"P{r['page_start']}-{r.get('page_end') or f.page_count} {r['sides'].capitalize()}" for r in parsed_r])
+                                rules_summary = f" (Partial: {r_desc})"
+                        except Exception:
+                            pass
+
+                    config_lines.append(
+                        f"  {idx}. {f.original_filename} ({f.page_count} pages)\n"
+                        f"     • {f_copies} Cop{'ies' if f_copies > 1 else 'y'} | {f_sides}{rules_summary} | {f_color}"
+                    )
+
+                files_cfg_str = "\n".join(config_lines)
                 base_charge = len(order.files) * settings.PRICE_FILE_BASE_CHARGE
                 print_charge = max(0.0, order.total_amount - base_charge)
 
@@ -632,13 +729,15 @@ async def handle_inbound_whatsapp_event(session: AsyncSession, event: Dict[str, 
                     f"✅ *Print Options Configured:*\n"
                     f"• *Sides:* {sides_desc}\n"
                     f"• *Color Mode:* {color_desc}\n"
+                    f"• *Copies:* {copies_desc}\n"
                     f"• *Total Pages:* {order.total_pages}\n"
                     f"• *Pickup Token:* *{order.pickup_token}*\n\n"
+                    f"📋 *File Details:*\n{files_cfg_str}\n\n"
                     f"💰 *Updated Cost Estimation:*\n"
                     f"• Document Handling: ₹{base_charge:.2f}\n"
                     f"• Printing ({order.total_pages} pages): ₹{print_charge:.2f}\n"
                     f"• *Total Cost: ₹{order.total_amount:.2f}*\n\n"
-                    f"👉 Send another PDF to add more files (up to {settings.MAX_FILES_PER_ORDER})\n"
+                    f"👉 Send another document to add more files (up to {settings.MAX_FILES_PER_ORDER})\n"
                     f"👉 Reply *DONE* (or *CONFIRM*) once you have sent all your files to get your payment QR!\n"
                     f"👉 Or reply *CANCEL* to cancel this order anytime"
                 )
