@@ -198,30 +198,75 @@ async def phone_notification_event(
     from backend.services.whatsapp.service import whatsapp_service
     from backend.core.logging import logger
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Malformed JSON payload")
+    # Resilient body ingestion (supports strict JSON, unescaped newlines from MacroDroid, form-urlencoded, or plain text)
+    body: Dict[str, Any] = {}
+    raw_bytes = await request.body()
+    raw_str = raw_bytes.decode("utf-8", errors="ignore").strip()
+
+    if raw_str:
+        try:
+            body = json.loads(raw_str)
+        except Exception:
+            try:
+                # Tolerate unescaped newlines and control characters from MacroDroid {not_text}
+                body = json.loads(raw_str, strict=False)
+            except Exception:
+                try:
+                    from urllib.parse import parse_qs
+                    parsed_qs = parse_qs(raw_str)
+                    if parsed_qs:
+                        body = {k: v[0] for k, v in parsed_qs.items()}
+                    else:
+                        body = {"text": raw_str}
+                except Exception:
+                    body = {"text": raw_str}
 
     raw_text = (
         body.get("text")
-        or body.get("rawNotification", {}).get("text")
+        or (body.get("rawNotification", {}).get("text") if isinstance(body.get("rawNotification"), dict) else "")
         or body.get("message")
         or (str(body.get("amount")) if body.get("amount") is not None else "")
     )
-    title = body.get("title") or body.get("rawNotification", {}).get("title") or ""
-    pkg = body.get("package") or body.get("rawNotification", {}).get("package") or "com.phonepe.app"
+    title = (
+        body.get("title")
+        or (body.get("rawNotification", {}).get("title") if isinstance(body.get("rawNotification"), dict) else "")
+        or ""
+    )
+    pkg = (
+        body.get("package")
+        or (body.get("rawNotification", {}).get("package") if isinstance(body.get("rawNotification"), dict) else "")
+        or body.get("app")
+        or "com.google.android.apps.nbu.paisa.user"
+    )
 
-    full_text = f"{title} {raw_text}".strip()
-    if not full_text:
-        raise HTTPException(status_code=400, detail="Missing notification text")
+    # Clean MacroDroid unexpanded placeholder magic tags (sent when tapping 'Test Action' in MacroDroid)
+    if str(raw_text).strip() in ["{not_text}", "{not_ticker}", ""]:
+        raw_text = ""
+    if str(title).strip() in ["{not_title}", ""]:
+        title = ""
+    if str(pkg).strip() in ["{not_app_package}", ""]:
+        pkg = "com.google.android.apps.nbu.paisa.user"
 
-    # Update liveness tracker
+    # Always update phone liveness heartbeat
     now = datetime.now(timezone.utc)
     _phone_observer_state["status"] = "ONLINE"
     _phone_observer_state["last_seen_at"] = now.isoformat()
     _phone_observer_state["last_package"] = pkg
     _phone_observer_state["event_count"] += 1
+
+    full_text = f"{title} {raw_text}".strip()
+
+    # If this is a test ping or empty MacroDroid heartbeat (e.g. from 'Test Action' or empty body)
+    if not full_text:
+        logger.info(f"Phone observer heartbeat ping received from MacroDroid (App: {pkg}). Connection verified.")
+        return {
+            "status": "success",
+            "action": "phone_heartbeat_acknowledged",
+            "message": "MacroDroid phone connected successfully! Ready to receive GPay/PhonePe notifications.",
+            "phone_liveness": "ONLINE",
+            "detected_app": pkg,
+            "hint": "When an actual payment arrives, live payment notification text will be verified automatically."
+        }
 
     # Extract monetary amount
     extracted_amount: Optional[float] = None

@@ -510,6 +510,42 @@ class OpenWAAdapter:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    async def ensure_webhook_registered(self, webhook_url: Optional[str] = None) -> bool:
+        """
+        Ensures that OpenWA has an active webhook registered to forward incoming WhatsApp messages.
+        In local development with Docker, this forwards to http://host.docker.internal:8000/webhooks/whatsapp.
+        """
+        target_url = webhook_url or getattr(settings, "OPENWA_WEBHOOK_URL", "http://host.docker.internal:8000/webhooks/whatsapp")
+        headers = self._get_headers()
+        try:
+            session_id = await self._resolve_session_id()
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{self.base_url}/api/sessions/{session_id}/webhooks", headers=headers)
+                if res.status_code == 200:
+                    webhooks = res.json()
+                    for wh in webhooks:
+                        if wh.get("url") == target_url and wh.get("active"):
+                            logger.info(f"OpenWA webhook already active: {wh.get('id')} -> {target_url}")
+                            return True
+
+                create_payload = {
+                    "url": target_url,
+                    "events": ["message.received"],
+                }
+                res = await client.post(
+                    f"{self.base_url}/api/sessions/{session_id}/webhooks",
+                    headers=headers,
+                    json=create_payload,
+                )
+                if res.status_code in [200, 201]:
+                    logger.info(f"OpenWA webhook registered successfully -> {target_url}")
+                    return True
+                else:
+                    logger.warning(f"Failed to register OpenWA webhook: HTTP {res.status_code} {res.text}")
+        except Exception as e:
+            logger.warning(f"Could not verify/register OpenWA webhook: {e}")
+        return False
+
 
 class WhatsAppService:
     """
@@ -521,6 +557,11 @@ class WhatsAppService:
     def __init__(self):
         self.meta_adapter = MetaCloudAdapter()
         self.openwa_adapter = OpenWAAdapter()
+
+    async def ensure_webhook_registered(self) -> bool:
+        if self.provider == "openwa":
+            return await self.openwa_adapter.ensure_webhook_registered()
+        return True
 
     @property
     def provider(self) -> str:

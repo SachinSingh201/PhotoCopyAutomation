@@ -1232,6 +1232,8 @@ async function reverifyRazorpayPayment(orderId) {
     } catch (err) {
         showToast("Reverification error: " + err.message, "error");
     }
+}
+
 // 10. Unified Payment Setup Hub (Case 1: Direct Cloud Webhook & Case 2: Counter Standee MacroDroid)
 async function fetchPaymentSetupData() {
     try {

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     OPENWA_SESSION_ID: str = "printshop_dev"
     OPENWA_ENGINE: str = "whatsapp-web.js"  # Engine: "whatsapp-web.js" (default) or "baileys"
     OPENWA_WEBHOOK_SECRET: str = ""
+    OPENWA_WEBHOOK_URL: str = "http://host.docker.internal:8000/webhooks/whatsapp"
 
     # LLM / NLP Service
     LLM_PROVIDER: str = "mock"  # "gemini" | "openai" | "mock"

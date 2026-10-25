@@ -16,6 +16,7 @@ from backend.core.logging import logger
 import backend.models
 from backend.services.orders.service import cleanup_expired_orders
 from backend.services.scheduling.service import seed_default_schedule_if_empty
+from backend.services.whatsapp.service import whatsapp_service
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -43,6 +44,10 @@ async def lifespan(app: FastAPI):
     # Seed default shop settings & schedule if empty
     async with AsyncSessionLocal() as session:
         await seed_default_schedule_if_empty(session)
+
+    # Ensure OpenWA webhook is registered if provider is openwa
+    if settings.WHATSAPP_PROVIDER == "openwa":
+        asyncio.create_task(whatsapp_service.ensure_webhook_registered())
 
     # Start 5-minute unpaid order cleanup task
     cleanup_task = asyncio.create_task(periodic_order_cleanup_worker())
@@ -101,23 +106,6 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/admin/", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/admin/paymentSetup", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/admin/{tab}", response_class=HTMLResponse, include_in_schema=False)
-async def serve_admin_dashboard(tab: Optional[str] = None):
-    index_path = STATIC_DIR / "index.html"
-    if index_path.exists():
-        return FileResponse(str(index_path))
-    return HTMLResponse("<h2>Admin UI not found</h2>", status_code=404)
-
-
-
-@app.get("/", include_in_schema=False)
-async def root_redirect():
-    return RedirectResponse(url="/admin")
-
-
 # Include Routers under standard prefixes and /api/v1
 app.include_router(health.router)
 app.include_router(health.router, prefix="/api/v1")
@@ -135,6 +123,22 @@ app.include_router(agent.router, prefix="/api/v1")
 # Admin router under /admin and /api/v1/admin
 app.include_router(admin.router)
 app.include_router(admin.router, prefix="/api/v1")
+
+
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/admin/", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/admin/paymentSetup", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/admin/{tab}", response_class=HTMLResponse, include_in_schema=False)
+async def serve_admin_dashboard(tab: Optional[str] = None):
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return HTMLResponse("<h2>Admin UI not found</h2>", status_code=404)
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/admin")
 
 
 if __name__ == "__main__":
