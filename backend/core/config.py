@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     PORT: int = 8000
     HOST: str = "0.0.0.0"
+    BACKEND_PUBLIC_URL: Optional[str] = None
     SECRET_KEY: str = "dev-insecure-secret-key-change-in-production"
 
     # Database

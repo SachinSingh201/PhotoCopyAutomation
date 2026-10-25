@@ -88,8 +88,16 @@ function switchTab(tabId) {
         p.classList.toggle('active', p.id === `pane-${tabId}`);
     });
 
+    try {
+        const newUrl = tabId === 'dashboard' ? '/admin' : `/admin/${tabId}`;
+        if (window.location.pathname !== newUrl) {
+            window.history.pushState({ tab: tabId }, '', newUrl);
+        }
+    } catch (e) {}
+
     refreshActiveTabData();
 }
+
 
 function openModal(id) {
     const modal = document.getElementById(id);
@@ -1224,6 +1232,236 @@ async function reverifyRazorpayPayment(orderId) {
     } catch (err) {
         showToast("Reverification error: " + err.message, "error");
     }
+// 10. Unified Payment Setup Hub (Case 1: Direct Cloud Webhook & Case 2: Counter Standee MacroDroid)
+async function fetchPaymentSetupData() {
+    try {
+        const hub = await apiRequest('/payments/setup-hub');
+        
+        // Active Provider KPI
+        const providerKpi = document.getElementById('hub-kpi-provider');
+        const providerSub = document.getElementById('hub-kpi-provider-sub');
+        if (providerKpi) {
+            const prov = (hub.active_provider || 'razorpay').toUpperCase();
+            providerKpi.textContent = prov;
+        }
+        if (providerSub) {
+            providerSub.textContent = hub.active_provider === 'razorpay' ? 'Direct Cloud Webhooks' : (hub.active_provider === 'youpi' ? 'Local Observer' : 'Counter Standee QR');
+        }
+
+        // Cloud Webhook status & fields
+        const cloudStatus = document.getElementById('hub-kpi-cloud-status');
+        if (cloudStatus) {
+            cloudStatus.textContent = hub.cloud_webhook?.status === 'configured' ? 'ACTIVE' : 'READY';
+        }
+        const webhookUrlInput = document.getElementById('hub-cloud-webhook-url');
+        if (webhookUrlInput && hub.cloud_webhook?.endpoint_url) {
+            webhookUrlInput.value = hub.cloud_webhook.endpoint_url;
+        }
+        const provSelect = document.getElementById('hub-cloud-provider');
+        if (provSelect && hub.active_provider) {
+            provSelect.value = hub.active_provider;
+        }
+        const keyIdInput = document.getElementById('hub-cloud-key-id');
+        if (keyIdInput && hub.credentials?.key_id) {
+            keyIdInput.value = hub.credentials.key_id;
+        }
+        const keySecretInput = document.getElementById('hub-cloud-key-secret');
+        if (keySecretInput && hub.credentials?.key_secret) {
+            keySecretInput.value = hub.credentials.key_secret;
+        }
+        const webhookSecretInput = document.getElementById('hub-cloud-webhook-secret');
+        if (webhookSecretInput && hub.credentials?.webhook_secret) {
+            webhookSecretInput.value = hub.credentials.webhook_secret;
+        }
+
+        // MacroDroid URL & Templates
+        const macrodroidUrlInput = document.getElementById('hub-macrodroid-url');
+        if (macrodroidUrlInput) {
+            if (hub.counter_phone?.macrodroid_endpoint_url) {
+                macrodroidUrlInput.value = hub.counter_phone.macrodroid_endpoint_url;
+            } else if (hub.server_lan_ip) {
+                macrodroidUrlInput.value = `http://${hub.server_lan_ip}:8000/api/v1/payments/phone-event`;
+            }
+        }
+
+        // Counter Standee QR status
+        const qrStatus = document.getElementById('hub-kpi-qr-status');
+        const qrSub = document.getElementById('hub-kpi-qr-sub');
+        if (qrStatus) {
+            qrStatus.textContent = hub.counter_qr_standee?.has_custom_image ? 'CUSTOM STANDEE' : 'DYNAMIC QR';
+        }
+        if (qrSub) {
+            qrSub.textContent = hub.counter_qr_standee?.has_custom_image ? 'Active Image in WhatsApp' : 'Instant NPCI format';
+        }
+
+        // Check Counter Phone Live Status
+        try {
+            const phoneRes = await fetch('/api/v1/payments/phone-status');
+            if (phoneRes.ok) {
+                const phoneData = await phoneRes.json();
+                const phoneStatusKpi = document.getElementById('hub-kpi-phone-status');
+                const phoneSubKpi = document.getElementById('hub-kpi-phone-sub');
+                const phoneLiveTag = document.getElementById('hub-phone-live-tag');
+                const phoneLiveDetail = document.getElementById('hub-phone-live-detail');
+
+                if (phoneData.connected) {
+                    if (phoneStatusKpi) {
+                        phoneStatusKpi.textContent = 'ONLINE';
+                        phoneStatusKpi.className = 'kpi-value text-emerald';
+                    }
+                    if (phoneSubKpi) phoneSubKpi.textContent = `Last ping ${phoneData.last_seen_relative || 'just now'}`;
+                    if (phoneLiveTag) {
+                        phoneLiveTag.textContent = 'ONLINE';
+                        phoneLiveTag.className = 'status-tag tag-verified';
+                    }
+                    if (phoneLiveDetail) {
+                        phoneLiveDetail.textContent = `Connected: ${phoneData.last_event?.app_package || 'MacroDroid'} • ${phoneData.total_events_received || 0} events verified`;
+                    }
+                } else {
+                    if (phoneStatusKpi) {
+                        phoneStatusKpi.textContent = 'STANDBY';
+                        phoneStatusKpi.className = 'kpi-value text-amber';
+                    }
+                    if (phoneSubKpi) phoneSubKpi.textContent = 'Waiting for push notification';
+                    if (phoneLiveTag) {
+                        phoneLiveTag.textContent = 'STANDBY';
+                        phoneLiveTag.className = 'status-tag';
+                    }
+                    if (phoneLiveDetail) {
+                        phoneLiveDetail.textContent = 'MacroDroid on counter phone will connect on first credit alert';
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Phone status check error:", e);
+        }
+
+    } catch (err) {
+        console.error("fetchPaymentSetupData error:", err);
+    }
+}
+
+function initPaymentHubHandlers() {
+    // Copy Cloud Webhook URL
+    document.getElementById('btn-copy-webhook-url')?.addEventListener('click', () => {
+        const urlInput = document.getElementById('hub-cloud-webhook-url');
+        if (urlInput) {
+            navigator.clipboard.writeText(urlInput.value).then(() => {
+                showToast("Webhook URL copied to clipboard!", "success");
+            }).catch(() => {
+                urlInput.select();
+                document.execCommand('copy');
+                showToast("Webhook URL copied!", "success");
+            });
+        }
+    });
+
+    // Copy MacroDroid Ingestion URL
+    document.getElementById('btn-copy-macrodroid-url')?.addEventListener('click', () => {
+        const urlInput = document.getElementById('hub-macrodroid-url');
+        if (urlInput) {
+            navigator.clipboard.writeText(urlInput.value).then(() => {
+                showToast("MacroDroid URL copied to clipboard!", "success");
+            }).catch(() => {
+                urlInput.select();
+                document.execCommand('copy');
+                showToast("MacroDroid URL copied!", "success");
+            });
+        }
+    });
+
+    // Copy MacroDroid JSON template
+    document.getElementById('btn-copy-macrodroid-json')?.addEventListener('click', () => {
+        const jsonInput = document.getElementById('hub-macrodroid-json');
+        if (jsonInput) {
+            navigator.clipboard.writeText(jsonInput.value).then(() => {
+                showToast("MacroDroid JSON template copied!", "success");
+            }).catch(() => {
+                jsonInput.select();
+                document.execCommand('copy');
+                showToast("MacroDroid JSON copied!", "success");
+            });
+        }
+    });
+
+    // Save Cloud Credentials
+    document.getElementById('btn-save-cloud-settings')?.addEventListener('click', async () => {
+        const provider = document.getElementById('hub-cloud-provider')?.value || 'razorpay';
+        const keyId = document.getElementById('hub-cloud-key-id')?.value.trim();
+        const keySecret = document.getElementById('hub-cloud-key-secret')?.value.trim();
+        const webhookSecret = document.getElementById('hub-cloud-webhook-secret')?.value.trim();
+
+        try {
+            const res = await apiRequest('/payments/setup-hub', {
+                method: 'POST',
+                body: JSON.stringify({
+                    provider: provider,
+                    key_id: keyId,
+                    key_secret: keySecret,
+                    webhook_secret: webhookSecret
+                })
+            });
+            showToast(res.message || "Payment settings updated successfully!", "success");
+            fetchPaymentSetupData();
+        } catch (err) {}
+    });
+
+    // Test Cloud Webhook
+    document.getElementById('btn-test-cloud-webhook')?.addEventListener('click', async () => {
+        try {
+            showToast("Sending test payment webhook...", "info");
+            const res = await apiRequest('/payments/test-cloud-webhook', {
+                method: 'POST',
+                body: JSON.stringify({ amount: 15.0 })
+            });
+            showToast(res.message || "Test cloud webhook dispatched successfully!", "success");
+            fetchPaymentSetupData();
+        } catch (err) {}
+    });
+
+    // Test Phone Notification (Simulate MacroDroid)
+    document.getElementById('btn-test-phone-notification')?.addEventListener('click', async () => {
+        try {
+            showToast("Simulating PhonePe / GPay credit notification...", "info");
+            const res = await apiRequest('/payments/test-phone-notification', {
+                method: 'POST',
+                body: JSON.stringify({
+                    amount: 20.0,
+                    app: "com.phonepe.app"
+                })
+            });
+            showToast(res.message || "Phone notification simulated successfully!", "success");
+            fetchPaymentSetupData();
+        } catch (err) {}
+    });
+
+    // Standee QR File Input Upload in Hub
+    document.getElementById('hub-standee-input')?.addEventListener('change', async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+            const token = getAdminToken();
+            const res = await fetch('/api/v1/admin/payments/qr-upload', {
+                method: 'POST',
+                headers: { 'X-Admin-Secret': token },
+                body: formData
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showToast("Counter Standee QR image uploaded successfully!", "success");
+                e.target.value = '';
+                fetchPaymentSetupData();
+            } else {
+                showToast(data.detail || "Upload failed", "error");
+            }
+        } catch (err) {
+            showToast("Upload failed: " + err.message, "error");
+        }
+    });
 }
 
 // 11. Service Controls
@@ -1280,7 +1518,9 @@ function refreshActiveTabData() {
     if (currentTab === 'schedule') fetchScheduleData();
     if (currentTab === 'reports') fetchReportsData();
     if (currentTab === 'settings') fetchSettingsData();
+    if (currentTab === 'paymentSetup') fetchPaymentSetupData();
 }
+
 
 // Initialization on DOM Ready
 document.addEventListener('DOMContentLoaded', () => {
@@ -1400,8 +1640,38 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {}
     });
 
-    // Initial load
-    refreshActiveTabData();
+    // Payment Setup Hub Handlers
+    initPaymentHubHandlers();
+
+    // Deep link tab routing from URL
+    const pathname = window.location.pathname.toLowerCase();
+    if (pathname.includes('/paymentsetup') || window.location.hash === '#paymentSetup') {
+        switchTab('paymentSetup');
+    } else if (pathname.includes('/queue')) {
+        switchTab('queue');
+    } else if (pathname.includes('/orders')) {
+        switchTab('orders');
+    } else if (pathname.includes('/history')) {
+        switchTab('history');
+    } else if (pathname.includes('/printers')) {
+        switchTab('printers');
+    } else if (pathname.includes('/schedule')) {
+        switchTab('schedule');
+    } else if (pathname.includes('/reports')) {
+        switchTab('reports');
+    } else if (pathname.includes('/settings')) {
+        switchTab('settings');
+    } else {
+        // Initial load for default dashboard
+        refreshActiveTabData();
+    }
+
+    // Handle browser back/forward buttons
+    window.addEventListener('popstate', (e) => {
+        if (e.state && e.state.tab) {
+            switchTab(e.state.tab);
+        }
+    });
 
     // 5-second polling loop
     pollInterval = setInterval(refreshActiveTabData, 5000);

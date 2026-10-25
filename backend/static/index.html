@@ -112,6 +112,11 @@
                     <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
                     <span>Settings</span>
                 </button>
+                <button class="nav-item" data-tab="paymentSetup" id="nav-btn-payment-setup">
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>
+                    <span>Payment Setup</span>
+                    <span class="badge badge-emerald" id="sidebar-payment-badge">Hub</span>
+                </button>
             </nav>
 
             <!-- Sidebar Status Strip -->
@@ -719,6 +724,210 @@
                             </div>
                             <div id="test-qr-uri" class="font-mono" style="font-size:0.72rem; color:var(--text-muted); margin-top:10px; word-break:break-all; max-width:320px;"></div>
                             <span id="test-qr-validity-badge" class="status-tag tag-verified" style="margin-top:8px;">Valid NPCI UPI Format ✅</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 9. PAYMENT SETUP HUB (Both Cloud Direct Webhooks & Counter Standee MacroDroid) -->
+            <section class="tab-pane" id="pane-paymentSetup">
+                <div class="pane-header">
+                    <div>
+                        <h2>⚡ Payment Connections & Verification Hub</h2>
+                        <p class="text-secondary">Configure automated payment receipt. Choose <b>Cloud Direct Webhooks</b> (Zero Phone, Zero App) or <b>Counter Phone Observer</b> (MacroDroid / Play Store).</p>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <span class="status-pill online" id="hub-liveness-pill">
+                            <span class="pulse-dot"></span>
+                            <span id="hub-liveness-text">GATEWAY ACTIVE</span>
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Top Status Summary Banner -->
+                <div class="kpi-grid mb-4" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+                    <div class="kpi-card">
+                        <div class="kpi-label">Active Provider</div>
+                        <div class="kpi-value text-cyan" id="hub-kpi-provider">LOADING...</div>
+                        <div class="kpi-subtext" id="hub-kpi-provider-sub">Primary payment rail</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Cloud Webhook Status</div>
+                        <div class="kpi-value text-emerald" id="hub-kpi-cloud-status">READY</div>
+                        <div class="kpi-subtext">Direct server-to-server</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Counter Phone Observer</div>
+                        <div class="kpi-value text-amber" id="hub-kpi-phone-status">STANDBY</div>
+                        <div class="kpi-subtext" id="hub-kpi-phone-sub">Waiting for ping</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-label">Counter QR Standee</div>
+                        <div class="kpi-value text-blue" id="hub-kpi-qr-status">DYNAMIC</div>
+                        <div class="kpi-subtext" id="hub-kpi-qr-sub">Instant NPCI format</div>
+                    </div>
+                </div>
+
+                <!-- Two-Column Architecture Grid -->
+                <div class="two-col-grid" style="display:grid; grid-template-columns: 1fr 1fr; gap:24px; align-items:start;">
+                    
+                    <!-- COLUMN 1: Case 1 — Direct Cloud-to-Server Webhook (Zero Phone, Zero App) -->
+                    <div class="glass-card" style="padding:24px; background:rgba(15, 23, 42, 0.7); border:1px solid rgba(56, 189, 248, 0.25); border-radius:var(--radius-lg);">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
+                            <div>
+                                <div style="display:inline-flex; align-items:center; gap:6px; background:rgba(56, 189, 248, 0.12); color:var(--accent-blue); padding:4px 10px; border-radius:var(--radius-full); font-size:0.75rem; font-weight:700; margin-bottom:8px;">
+                                    ☁️ CASE 1: ZERO PHONE / ZERO APP
+                                </div>
+                                <h3 style="font-size:1.15rem; font-weight:700;">Direct Cloud Webhooks</h3>
+                                <p style="font-size:0.82rem; color:var(--text-secondary); margin-top:4px;">
+                                    The payment company's cloud server calls your server directly via HTTP Webhook. Phone can be turned off or left at home.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Webhook URL Box -->
+                        <div class="form-group">
+                            <label style="font-size:0.8rem; font-weight:700; color:var(--text-secondary);">Your Public Server Webhook URL</label>
+                            <div style="display:flex; gap:8px;">
+                                <input type="text" id="hub-cloud-webhook-url" class="form-input font-mono" readonly style="font-size:0.8rem; background:rgba(0,0,0,0.4);" value="http://localhost:8000/api/v1/payments/razorpay/webhook">
+                                <button class="btn btn-outline" id="btn-copy-webhook-url" title="Copy to clipboard">📋 Copy</button>
+                            </div>
+                            <span style="font-size:0.75rem; color:var(--text-muted); display:block; margin-top:4px;">
+                                Paste this exact URL into your Razorpay, Cashfree, or Paytm for Business Webhooks dashboard.
+                            </span>
+                        </div>
+
+                        <!-- Provider Selection & Credentials -->
+                        <div class="form-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;">
+                            <div class="form-group" style="grid-column: span 2;">
+                                <label style="font-size:0.8rem; font-weight:700;">Active Cloud Payment Gateway</label>
+                                <select id="hub-cloud-provider" class="form-select">
+                                    <option value="razorpay">Razorpay (Dynamic UPI & Payment Links)</option>
+                                    <option value="youpi">YouPI-PG (Sovereign Local UPI Gateway)</option>
+                                    <option value="counter_qr">Counter Standee QR / Cashier Till</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label style="font-size:0.8rem; font-weight:700;">API Key / Key ID</label>
+                                <input type="text" id="hub-cloud-key-id" class="form-input font-mono" placeholder="rzp_live_xxxxxxxx">
+                            </div>
+
+                            <div class="form-group">
+                                <label style="font-size:0.8rem; font-weight:700;">API Secret / Key Secret</label>
+                                <input type="password" id="hub-cloud-key-secret" class="form-input font-mono" placeholder="••••••••••••••••">
+                            </div>
+
+                            <div class="form-group" style="grid-column: span 2;">
+                                <label style="font-size:0.8rem; font-weight:700;">Webhook Secret (For HMAC Verification)</label>
+                                <input type="password" id="hub-cloud-webhook-secret" class="form-input font-mono" placeholder="Your webhook signing secret">
+                            </div>
+                        </div>
+
+                        <div class="form-actions mt-4" style="display:flex; justify-content:space-between; align-items:center;">
+                            <button class="btn btn-outline" id="btn-test-cloud-webhook" style="color:var(--accent-cyan); border-color:rgba(6,182,212,0.4);">
+                                🧪 Send Test Cloud Webhook
+                            </button>
+                            <button class="btn btn-primary" id="btn-save-cloud-settings">
+                                💾 Save Credentials
+                            </button>
+                        </div>
+
+                        <!-- Instructions card -->
+                        <div class="glass-card mt-4" style="background:rgba(30, 41, 59, 0.4); padding:14px; border-radius:var(--radius-md); font-size:0.78rem; color:var(--text-secondary); border:1px solid var(--border-color);">
+                            <div style="font-weight:700; color:var(--text-primary); margin-bottom:6px;">📘 30-Second Setup in Razorpay Dashboard:</div>
+                            <ol style="margin-left:18px; line-height:1.6;">
+                                <li>Log in to your <b>Razorpay Dashboard</b> on your computer.</li>
+                                <li>Navigate to <b>Settings ➔ Webhooks ➔ Add New Webhook</b>.</li>
+                                <li>Paste the <b>Webhook URL</b> above and select active events: <code>payment_link.paid</code> and <code>payment.captured</code>.</li>
+                                <li>Save the webhook. All customer payments will now verify instantly without any phone app!</li>
+                            </ol>
+                        </div>
+                    </div>
+
+                    <!-- COLUMN 2: Case 2 — Counter Paper Standee QR & Phone Observer (MacroDroid / Play Store) -->
+                    <div class="glass-card" style="padding:24px; background:rgba(15, 23, 42, 0.7); border:1px solid rgba(245, 158, 11, 0.25); border-radius:var(--radius-lg);">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px;">
+                            <div>
+                                <div style="display:inline-flex; align-items:center; gap:6px; background:rgba(245, 158, 11, 0.12); color:var(--accent-amber); padding:4px 10px; border-radius:var(--radius-full); font-size:0.75rem; font-weight:700; margin-bottom:8px;">
+                                    📱 CASE 2: PAPER STANDEE & PHONE OBSERVER
+                                </div>
+                                <h3 style="font-size:1.15rem; font-weight:700;">Counter Standee & MacroDroid</h3>
+                                <p style="font-size:0.82rem; color:var(--text-secondary); margin-top:4px;">
+                                    Uses your existing counter standee QR (PhonePe / GPay / Paytm / IPPB). MacroDroid forwards credit push notifications directly to this PC.
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Live Phone Liveness Pill -->
+                        <div class="glass-card mb-3" style="display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:rgba(0,0,0,0.3); border-radius:var(--radius-md);">
+                            <div>
+                                <span style="font-size:0.82rem; font-weight:700; display:block;">Counter Phone Status</span>
+                                <span id="hub-phone-live-detail" style="font-size:0.75rem; color:var(--text-muted);">Listening for incoming push alerts</span>
+                            </div>
+                            <span class="status-tag" id="hub-phone-live-tag" style="background:rgba(245,158,11,0.15); color:var(--accent-amber); font-weight:700;">STANDBY</span>
+                        </div>
+
+                        <!-- MacroDroid Ingest Endpoint URL -->
+                        <div class="form-group">
+                            <label style="font-size:0.8rem; font-weight:700; color:var(--text-secondary);">MacroDroid HTTP Request URL (Local Network)</label>
+                            <div style="display:flex; gap:8px;">
+                                <input type="text" id="hub-macrodroid-url" class="form-input font-mono" readonly style="font-size:0.8rem; background:rgba(0,0,0,0.4);" value="http://127.0.0.1:8000/api/v1/payments/phone-event">
+                                <button class="btn btn-outline" id="btn-copy-macrodroid-url" title="Copy to clipboard">📋 Copy</button>
+                            </div>
+                            <span style="font-size:0.75rem; color:var(--text-muted); display:block; margin-top:4px;">
+                                Enter this endpoint in MacroDroid's <b>HTTP Request (POST)</b> action on your counter phone.
+                            </span>
+                        </div>
+
+                        <!-- MacroDroid JSON Payload Box -->
+                        <div class="form-group mt-3">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                <label style="font-size:0.8rem; font-weight:700; color:var(--text-secondary);">MacroDroid JSON Body Template</label>
+                                <button class="btn btn-ghost" id="btn-copy-macrodroid-json" style="font-size:0.75rem; padding:2px 8px;">📋 Copy JSON</button>
+                            </div>
+                            <textarea id="hub-macrodroid-json" class="form-input font-mono" readonly style="font-size:0.75rem; height:95px; background:rgba(0,0,0,0.4); line-height:1.4; resize:none;">{
+  "amount": "{not_text}",
+  "rawNotification": {
+    "title": "{not_title}",
+    "text": "{not_text}",
+    "package": "{not_app_package}"
+  }
+}</textarea>
+                        </div>
+
+                        <!-- Supported Apps Chips -->
+                        <div style="margin-top:12px;">
+                            <label style="font-size:0.78rem; font-weight:700; color:var(--text-secondary); display:block; margin-bottom:6px;">Supported Verified Apps:</label>
+                            <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">PhonePe</span>
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">PhonePe Business</span>
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">Google Pay for Business</span>
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">Paytm for Business</span>
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">BharatPe</span>
+                                <span class="status-tag tag-verified" style="font-size:0.7rem;">IPPB Banking</span>
+                            </div>
+                        </div>
+
+                        <div class="form-actions mt-4" style="display:flex; justify-content:space-between; align-items:center;">
+                            <button class="btn btn-outline" id="btn-test-phone-notification" style="color:var(--accent-amber); border-color:rgba(245,158,11,0.4);">
+                                🧪 Simulate Phone Notification
+                            </button>
+                            <button class="btn btn-primary" id="btn-open-standee-upload" onclick="document.getElementById('hub-standee-input').click()">
+                                📷 Upload Counter Standee QR
+                            </button>
+                            <input type="file" id="hub-standee-input" accept="image/png,image/jpeg" style="display:none;">
+                        </div>
+
+                        <!-- Instructions Card -->
+                        <div class="glass-card mt-4" style="background:rgba(30, 41, 59, 0.4); padding:14px; border-radius:var(--radius-md); font-size:0.78rem; color:var(--text-secondary); border:1px solid var(--border-color);">
+                            <div style="font-weight:700; color:var(--text-primary); margin-bottom:6px;">📘 2-Minute Setup in MacroDroid (Play Store):</div>
+                            <ol style="margin-left:18px; line-height:1.6;">
+                                <li>Install <b>MacroDroid</b> from Google Play Store (Zero sideloading).</li>
+                                <li><b>Trigger</b>: Notification Received ➔ Select PhonePe / GPay Business.</li>
+                                <li><b>Action</b>: HTTP Request (POST) ➔ Paste the URL and JSON body above.</li>
+                                <li>Turn MacroDroid ON. Every counter payment will automatically spool to the printer!</li>
+                            </ol>
                         </div>
                     </div>
                 </div>

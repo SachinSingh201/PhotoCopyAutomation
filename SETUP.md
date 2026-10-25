@@ -32,6 +32,12 @@ A comprehensive, production-ready guide to set up the **Photocopy & Print Automa
    - [7.6 Print Agent Polling & Execution Test](#76-print-agent-polling--execution-test)
    - [7.7 Running Automated Test Suite](#77-running-automated-test-suite)
 8. [Troubleshooting & Best Practices](#8-troubleshooting--best-practices)
+9. [Automated Payment Connections & Verification Setup (Unified Hub)](#9-automated-payment-connections--verification-setup-unified-hub)
+   - [9.1 Accessing the Unified Payment Setup Hub](#91-accessing-the-unified-payment-setup-hub)
+   - [9.2 Case 1: Direct Cloud-to-Server Webhooks (Zero Phone, Zero App)](#92-case-1-direct-cloud-to-server-webhooks-zero-phone-zero-app)
+   - [9.3 Case 2: Counter Paper Standee QR & MacroDroid Observer (Play Store Verified)](#93-case-2-counter-paper-standee-qr--macrodroid-observer-play-store-verified)
+   - [9.4 Comparison: Cloud Webhooks vs Paper Standee Observer](#94-comparison-cloud-webhooks-vs-paper-standee-observer)
+   - [9.5 Testing & Verification Reference Commands](#95-testing--verification-reference-commands)
 
 ---
 
@@ -572,6 +578,231 @@ pytest tests/ -v
    - Verify that `./storage/private` exists and is writable by the user running the FastAPI process.
 5. **Alembic Migration Out of Sync**:
    - If resetting the database in development: delete `whatsapp_print.db` and run `alembic upgrade head`.
+
+---
+
+## 9. Automated Payment Connections & Verification Setup (Unified Hub)
+
+The system provides an automated payment verification pipeline managed directly from the **PrintShop Admin Dashboard** at:
+👉 **`http://localhost:8000/admin/paymentSetup`**
+
+The unified setup hub accommodates two business operating models:
+- **Case 1: Direct Cloud-to-Server Webhook (Zero Phone, Zero App)** — When YES: Merchant gateway with cloud webhooks (Razorpay / Cashfree / Paytm for Business).
+- **Case 2: Counter Paper Standee QR & MacroDroid Observer (Play Store Verified)** — When NO: Offline paper QR standees (PhonePe, Google Pay Business, Paytm Business, BharatPe, IPPB) using standard Google Play Store automation with zero sideloaded APKs.
+
+---
+
+### 9.1 Accessing the Unified Payment Setup Hub
+
+1. Open your browser and navigate to:
+   ```text
+   http://localhost:8000/admin/paymentSetup
+   ```
+2. Enter your **Admin Secret Key** (Default: `6396` or your configured `ADMIN_SECRET`).
+3. You will see real-time KPIs:
+   - **Active Provider**: Current verification engine (`RAZORPAY`, `YOUPI`, or `COUNTER_QR`).
+   - **Cloud Webhook Status**: Direct server-to-server gateway readiness.
+   - **Counter Phone Observer**: Live liveness heartbeat of your counter phone.
+   - **Counter QR Standee**: Status of custom counter standee image vs dynamic NPCI QR.
+
+---
+
+### 9.2 Case 1: Direct Cloud-to-Server Webhooks (Zero Phone, Zero App)
+
+#### When to Use:
+Use this approach when you have a payment gateway account (e.g., Razorpay, Cashfree, or Paytm for Business) and want **100% automated, unattended operation**.
+- **Zero Phone required**: The shop owner's phone can be turned off, out of battery, or at home.
+- **Zero App required**: No helper apps or observers needed.
+- **Direct Cloud Notification**: The payment provider's servers trigger your backend server over HTTPS as soon as the customer pays.
+
+#### Architecture:
+```text
+Customer Pays (GPay / PhonePe / Paytm / Card / NetBanking)
+    │
+    ▼
+Payment Gateway Cloud (Razorpay / Cashfree)
+    │
+    ▼ HTTP POST (Cryptographic HMAC Signature)
+FastAPI Backend (/api/v1/payments/razorpay/webhook)
+    │
+    ├─► Validates HMAC-SHA256 signature
+    ├─► Transitions Order to PAID (Deterministic state machine)
+    ├─► Automatically spools print job to Print Agent Queue
+    └─► Dispatches WhatsApp pickup token & receipt to customer
+```
+
+#### Step-by-Step Setup Guide:
+1. **Get your Public Server URL**:
+   - In production: Your public domain (e.g., `https://print.yourshop.com`).
+   - In development: Run `ngrok http 8000` or `cloudflared tunnel` to obtain a public URL (e.g., `https://xyz.ngrok-free.app`).
+2. **Copy the Cloud Webhook URL**:
+   - In the dashboard (`http://localhost:8000/admin/paymentSetup`), locate the **Case 1** card.
+   - Click **📋 Copy** next to the Webhook URL:
+     ```text
+     https://<your-public-domain>/api/v1/payments/razorpay/webhook
+     ```
+3. **Configure in Razorpay Dashboard**:
+   - Go to [Razorpay Dashboard](https://dashboard.razorpay.com/) ➔ **Account & Settings** ➔ **Webhooks** ➔ **Add New Webhook**.
+   - **Webhook URL**: Paste your copied URL (`https://<your-public-domain>/api/v1/payments/razorpay/webhook`).
+   - **Secret**: Enter a strong secret string (e.g., `rzp_whsec_printshop_2026`).
+   - **Active Events**: Select:
+     - `payment_link.paid`
+     - `payment.captured`
+   - Click **Save**.
+4. **Save Credentials in PrintShop Admin**:
+   - Back in `http://localhost:8000/admin/paymentSetup`:
+     - Gateway: Select **Razorpay**.
+     - API Key ID: Enter your `rzp_live_...` or `rzp_test_...` key.
+     - API Key Secret: Enter your Razorpay secret.
+     - Webhook Secret: Enter the exact secret string you set in Razorpay.
+   - Click **💾 Save Credentials**.
+5. **Verify with Test Webhook**:
+   - Click the **🧪 Send Test Cloud Webhook** button.
+   - The dashboard will confirm receipt, verify the HMAC signature, and report successful end-to-end routing.
+
+---
+
+### 9.3 Case 2: Counter Paper Standee QR & MacroDroid Observer (Play Store Verified)
+
+#### When to Use:
+Use this approach if you do **not** have a formal merchant payment gateway integration, but instead display **physical paper QR standees** on your shop counter (such as Google Pay for Business, PhonePe Business, Paytm for Business, BharatPe, or India Post Payments Bank - IPPB).
+
+> **Important Security Advantage — Zero Sideloaded APKs:**
+> Traditional custom observer APKs trigger severe Google Play Protect warnings (`Threat Detected: Harmful App / Data Breach Risk`) because they request invasive SMS permissions (`READ_SMS`, `RECEIVE_SMS`).
+> This system eliminates all custom APKs. Instead, it uses **MacroDroid**, an official, verified Google Play Store app with 10M+ downloads and zero Play Protect warnings. MacroDroid safely forwards incoming payment notification push alerts over local Wi-Fi to your Print PC.
+
+#### Supported Apps & Verified Patterns:
+| Provider App | Android Package | Notification Pattern | 12-Digit UTR Included? |
+| :--- | :--- | :--- | :--- |
+| **PhonePe / PhonePe Business** | `com.phonepe.app` / `com.phonepe.app.business` | *"Received ₹XX.00 from ... (UTR: 123456789012)"* | ✅ Yes |
+| **Google Pay for Business** | `com.google.android.apps.nbu.paisa.merchant` | *"Received ₹XX.00 on Google Pay ... Ref: 123456789012"* | ✅ Yes |
+| **Paytm for Business** | `net.one97.paytm.merchant` | *"Received ₹XX in your Bank Account ... UPI Ref: 123456789012"* | ✅ Yes |
+| **BharatPe Merchant** | `com.bharatpe` | *"Payment of ₹XX received ... RRN 123456789012"* | ✅ Yes |
+| **IPPB Mobile Banking** | `com.fss.ippb` | *"Account credited by ₹XX.00 ... Ref No: 123456789012"* | ✅ Yes |
+
+#### Architecture:
+```text
+Customer scans Paper Standee QR & Pays
+    │
+    ▼
+Shop Owner's Phone receives Push Notification
+    │
+    ▼ MacroDroid (Official Google Play Store App)
+Intercepts Notification & extracts Amount + UTR
+    │
+    ▼ Local Wi-Fi HTTP POST (/api/v1/payments/phone-event)
+FastAPI Backend Server on Shop PC
+    │
+    ├─► Validates exact Amount & 12-digit UTR against active Draft / Pending Orders
+    ├─► Transitions Order to PAID (State Machine)
+    ├─► Spools print job directly to physical printer
+    └─► Dispatches WhatsApp confirmation to customer
+```
+
+#### Step-by-Step Setup Guide:
+
+##### Step 1: Install MacroDroid from Google Play Store
+1. Open **Google Play Store** on your Android phone (the phone that receives shop payments).
+2. Search for **MacroDroid - Device Automation** (by ArloSoft, 10M+ downloads) and tap **Install**.
+3. Launch MacroDroid and grant **Notification Access** permission when prompted:
+   - *Android Settings ➔ Apps & Notifications ➔ Special App Access ➔ Notification Access ➔ Enable MacroDroid*.
+
+##### Step 2: Upload Your Counter Standee QR Image
+1. In the PrintShop Admin Dashboard (`http://localhost:8000/admin/paymentSetup`), locate the **Case 2** card.
+2. Click **📷 Upload Counter Standee QR**.
+3. Select a clear photo or scan of your counter QR standee (`shop_qr.png`).
+4. When uploaded, the system will automatically send this exact counter QR standee image to customers on WhatsApp along with their calculated order total!
+
+##### Step 3: Configure the Macro in MacroDroid (Takes 2 Minutes)
+1. In MacroDroid, tap **Add Macro** (+).
+2. **Trigger**:
+   - Tap **+** on Triggers (Red) ➔ **Device Events** ➔ **Notification** ➔ **Notification Received**.
+   - Select **Select Applications** ➔ Check your payment app (e.g., **PhonePe Business**, **Google Pay for Business**, **Paytm for Business**, or **IPPB**).
+   - Tap **OK**.
+3. **Action**:
+   - Tap **+** on Actions (Blue) ➔ **Connectivity** ➔ **HTTP Request**.
+   - **Request Method**: Select `POST`.
+   - **URL / Path**: Enter the Ingestion URL shown on your Admin Dashboard:
+     ```text
+     http://<SHOP_PC_LOCAL_IP>:8000/api/v1/payments/phone-event
+     ```
+     *(Example: `http://192.168.1.100:8000/api/v1/payments/phone-event`. Both your phone and shop PC must be on the same shop Wi-Fi network).*
+   - **Content Type**: Select `application/json`.
+   - **Request Body**: Paste the MacroDroid JSON Template from the Admin Dashboard:
+     ```json
+     {
+       "amount": "{not_text}",
+       "rawNotification": {
+         "title": "{not_title}",
+         "text": "{not_text}",
+         "package": "{not_app_package}"
+       }
+     }
+     ```
+     *(Note: `{not_text}`, `{not_title}`, and `{not_app_package}` are MacroDroid's built-in magic tags that automatically insert the live notification content).*
+   - Tap **OK**.
+4. **Name & Save Macro**:
+   - Name the macro: `PrintShop UPI Payment Ingestion`.
+   - Toggle the switch to **ON**.
+
+##### Step 4: Verify Phone Connection in Dashboard
+- In the Admin Dashboard (`http://localhost:8000/admin/paymentSetup`), the **Counter Phone Observer** indicator will turn green **ONLINE** on your first test payment.
+- You can click **🧪 Simulate Phone Notification** to test and verify the notification parser instantly.
+
+---
+
+### 9.4 Comparison: Cloud Webhooks vs Paper Standee Observer
+
+| Feature | Case 1: Direct Cloud Webhook | Case 2: Counter Paper Standee |
+| :--- | :--- | :--- |
+| **Phone Required?** | ❌ No (Zero Phone) | ✅ Yes (Counter Android phone on shop Wi-Fi) |
+| **App Required?** | ❌ No (Zero App) | 📱 MacroDroid (Play Store, no sideloaded APK) |
+| **Play Protect Threat Warnings?** | 🛡️ None (Cloud API) | 🛡️ None (MacroDroid is verified Google Play App) |
+| **Payment Source** | Dynamic Razorpay / UPI Link | Physical Paper Standee Sticker (GPay / PhonePe / IPPB) |
+| **Automated Printing Trigger** | Instant server webhook | Instant local HTTP notification forward |
+| **Shop Owner Away from Counter?** | Works completely unattended | Works as long as phone is on shop Wi-Fi |
+| **Customer Payment Options** | Any UPI App, NetBanking, Debit/Credit Card | Any UPI App (GPay, PhonePe, Paytm, BHIM) |
+| **Setup Time** | ~2 minutes | ~3 minutes |
+
+---
+
+### 9.5 Testing & Verification Reference Commands
+
+#### Test Direct Cloud Webhook (Simulate Razorpay Payment):
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/payments/test-cloud-webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Secret: 6396" \
+  -d '{
+    "amount": 25.0,
+    "order_id": "optional-order-uuid-here"
+  }'
+```
+
+#### Test Counter Phone Push Notification (Simulate MacroDroid Ingestion):
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/payments/phone-event" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": "20.00",
+    "rawNotification": {
+      "title": "Payment Received",
+      "text": "Received ₹20.00 from John Doe. UTR: 429381729481",
+      "package": "com.phonepe.app"
+    }
+  }'
+```
+
+#### Check Counter Phone Liveness & Connected Status:
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/payments/phone-status"
+```
+
+#### Inspect Payment Setup Hub Diagnostics:
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/payments/setup-hub" \
+  -H "X-Admin-Secret: 6396"
+```
 
 ---
 *Photocopy Automation System — Developed for production-grade, autonomous document printing.*

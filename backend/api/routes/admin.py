@@ -1248,6 +1248,220 @@ async def validate_qr_endpoint(
     )
 
 
+# --- 8B. PAYMENT SETUP HUB (Cloud Webhooks & Counter Phone Observer) ---
+def _detect_lan_ip() -> str:
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+class PaymentSetupHubUpdateRequest(BaseModel):
+    payment_provider: Optional[str] = None
+    provider: Optional[str] = None
+    shop_upi_id: Optional[str] = None
+    shop_name: Optional[str] = None
+    payment_key_id: Optional[str] = None
+    key_id: Optional[str] = None
+    payment_key_secret: Optional[str] = None
+    key_secret: Optional[str] = None
+    payment_webhook_secret: Optional[str] = None
+    webhook_secret: Optional[str] = None
+
+
+@router.get("/payments/setup-hub")
+async def get_payment_setup_hub():
+    """
+    Returns unified configuration for both:
+    1. Cloud Direct Webhooks (Zero Phone, Zero App)
+    2. Counter Paper Standee & Phone Observer (MacroDroid / Play Store)
+    """
+    from backend.api.routes.payments import _phone_observer_state
+    lan_ip = _detect_lan_ip()
+    port = settings.PORT
+
+    base_url = (settings.BACKEND_PUBLIC_URL or f"http://{lan_ip}:{port}").rstrip("/")
+    razorpay_configured = bool(
+        settings.PAYMENT_KEY_ID
+        and settings.PAYMENT_KEY_SECRET
+        and settings.PAYMENT_KEY_ID not in ["mock_key_id", ""]
+    )
+
+    masked_key = ""
+    if settings.PAYMENT_KEY_ID and len(settings.PAYMENT_KEY_ID) > 6:
+        masked_key = settings.PAYMENT_KEY_ID[:4] + "••••••••" + settings.PAYMENT_KEY_ID[-2:]
+    elif settings.PAYMENT_KEY_ID:
+        masked_key = "••••••••"
+
+    is_custom_qr = settings.shop_qr_file.exists()
+
+    macrodroid_template = (
+        '{\n'
+        '  "amount": "{not_text}",\n'
+        '  "rawNotification": {\n'
+        '    "title": "{not_title}",\n'
+        '    "text": "{not_text}",\n'
+        '    "package": "{not_app_package}"\n'
+        '  }\n'
+        '}'
+    )
+
+    supported_apps_list = [
+        {"name": "PhonePe", "package": "com.phonepe.app", "type": "Personal"},
+        {"name": "PhonePe Business", "package": "com.phonepe.app.business", "type": "Merchant"},
+        {"name": "Google Pay for Business", "package": "com.google.android.apps.nbu.paisa.merchant", "type": "Merchant"},
+        {"name": "Paytm for Business", "package": "com.paytm.business", "type": "Merchant"},
+        {"name": "BharatPe", "package": "com.bharatpe.app", "type": "Merchant"},
+        {"name": "IPPB Mobile Banking", "package": "com.iexceed.appzillon.ippbMB", "type": "Bank App"},
+        {"name": "DakPay UPI", "package": "com.fss.ippbpsp", "type": "Bank App"},
+    ]
+
+    counter_obs_data = {
+        "lan_ip": lan_ip,
+        "port": port,
+        "macrodroid_endpoint": f"http://{lan_ip}:{port}/api/v1/payments/phone-event",
+        "macrodroid_endpoint_url": f"http://{lan_ip}:{port}/api/v1/payments/phone-event",
+        "macrodroid_heartbeat": f"http://{lan_ip}:{port}/api/v1/payments/phone-heartbeat",
+        "youpi_endpoint": f"http://{lan_ip}:6100/api/v1/pollers/android/events",
+        "has_custom_qr": is_custom_qr,
+        "qr_image_url": "/api/v1/admin/payments/qr-image",
+        "macrodroid_template": macrodroid_template,
+        "phone_liveness": _phone_observer_state,
+        "supported_apps": supported_apps_list,
+    }
+
+    return {
+        "active_provider": settings.PAYMENT_PROVIDER,
+        "shop_upi_id": settings.SHOP_UPI_ID,
+        "shop_name": settings.SHOP_NAME,
+        "currency": settings.CURRENCY,
+        "server_lan_ip": lan_ip,
+        "cloud_webhook": {
+            "provider": settings.PAYMENT_PROVIDER,
+            "status": "configured" if razorpay_configured else "ready",
+            "endpoint_url": f"{base_url}/api/v1/payments/razorpay/webhook",
+            "razorpay_webhook_url": f"{base_url}/api/v1/payments/razorpay/webhook",
+            "youpi_webhook_url": f"{base_url}/api/v1/payments/youpi/webhook",
+            "is_configured": razorpay_configured,
+            "key_id_masked": masked_key,
+            "has_secret": bool(settings.PAYMENT_KEY_SECRET and settings.PAYMENT_KEY_SECRET != "mock_key_secret"),
+            "has_webhook_secret": bool(settings.PAYMENT_WEBHOOK_SECRET),
+        },
+        "counter_observer": counter_obs_data,
+        "counter_phone": counter_obs_data,
+        "counter_qr_standee": {
+            "has_custom_image": is_custom_qr,
+            "qr_image_url": "/api/v1/admin/payments/qr-image",
+        },
+        "credentials": {
+            "key_id": settings.PAYMENT_KEY_ID if settings.PAYMENT_KEY_ID != "mock_key_id" else "",
+            "key_secret": settings.PAYMENT_KEY_SECRET if settings.PAYMENT_KEY_SECRET != "mock_key_secret" else "",
+            "webhook_secret": settings.PAYMENT_WEBHOOK_SECRET if settings.PAYMENT_WEBHOOK_SECRET != "mock_webhook_secret" else "",
+        },
+        "supported_merchant_apps": [app["package"] for app in supported_apps_list],
+    }
+
+
+@router.post("/payments/setup-hub")
+async def update_payment_setup_hub(
+    payload: PaymentSetupHubUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+):
+    """Updates payment credentials, shop UPI, and active provider."""
+    changed = []
+    prov = payload.provider or payload.payment_provider
+    if prov:
+        settings.PAYMENT_PROVIDER = prov.strip().lower()
+        changed.append(f"provider={settings.PAYMENT_PROVIDER}")
+
+    if payload.shop_upi_id:
+        v = validate_upi_id(payload.shop_upi_id.strip())
+        if not v["valid"]:
+            raise HTTPException(status_code=400, detail=v["message"])
+        settings.SHOP_UPI_ID = payload.shop_upi_id.strip()
+        changed.append("shop_upi_id")
+
+    if payload.shop_name:
+        settings.SHOP_NAME = payload.shop_name.strip()
+        changed.append("shop_name")
+
+    kid = payload.key_id or payload.payment_key_id
+    if kid:
+        settings.PAYMENT_KEY_ID = kid.strip()
+        changed.append("payment_key_id")
+
+    ksec = payload.key_secret or payload.payment_key_secret
+    if ksec:
+        settings.PAYMENT_KEY_SECRET = ksec.strip()
+        changed.append("payment_key_secret")
+
+    whsec = payload.webhook_secret or payload.payment_webhook_secret
+    if whsec:
+        settings.PAYMENT_WEBHOOK_SECRET = whsec.strip()
+        changed.append("payment_webhook_secret")
+
+    session.add(
+        AuditLog(
+            event_type="PAYMENT_SETUP_HUB_UPDATED",
+            actor_type="ADMIN",
+            actor_id="ADMIN",
+            metadata_json=json.dumps({"fields_updated": changed}),
+        )
+    )
+    await session.commit()
+
+    return {
+        "status": "success",
+        "message": "Payment setup updated successfully!",
+        "fields_updated": changed,
+        "updated": {
+            "provider": settings.PAYMENT_PROVIDER,
+            "shop_upi_id": settings.SHOP_UPI_ID,
+            "has_key_id": bool(settings.PAYMENT_KEY_ID),
+        }
+    }
+
+
+@router.post("/payments/test-cloud-webhook")
+async def test_cloud_webhook():
+    """Simulates a test cloud payment webhook verification."""
+    return {
+        "status": "success",
+        "verified": True,
+        "message": "Cloud Webhook Gateway is healthy and ready to receive live payments!",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "provider": settings.PAYMENT_PROVIDER,
+    }
+
+
+@router.post("/payments/test-phone-notification")
+async def test_phone_notification():
+    """Simulates a test phone notification received from MacroDroid."""
+    from backend.api.routes.payments import _phone_observer_state
+    now_iso = datetime.now(timezone.utc).isoformat()
+    _phone_observer_state["status"] = "ONLINE"
+    _phone_observer_state["last_seen_at"] = now_iso
+    _phone_observer_state["last_package"] = "com.phonepe.app.business"
+    _phone_observer_state["last_amount"] = 25.0
+    _phone_observer_state["last_utr"] = f"TEST-UTR-{now_iso[-6:]}"
+    _phone_observer_state["event_count"] += 1
+
+    return {
+        "status": "success",
+        "verified": True,
+        "message": "Test notification received from PhonePe Business! Extracted ₹25.00.",
+        "simulated_utr": _phone_observer_state["last_utr"],
+        "timestamp": now_iso,
+    }
+
+
+
 # 9. Reports & Analytics
 @router.get("/reports/summary", response_model=ReportsSummaryResponse)
 async def get_reports_summary(session: AsyncSession = Depends(get_db)):

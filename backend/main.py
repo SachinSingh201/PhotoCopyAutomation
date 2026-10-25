@@ -1,5 +1,6 @@
 import asyncio
 import os
+from typing import Optional
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request, status
@@ -102,11 +103,14 @@ if STATIC_DIR.exists():
 
 @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/admin/", response_class=HTMLResponse, include_in_schema=False)
-async def serve_admin_dashboard():
+@app.get("/admin/paymentSetup", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/admin/{tab}", response_class=HTMLResponse, include_in_schema=False)
+async def serve_admin_dashboard(tab: Optional[str] = None):
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
     return HTMLResponse("<h2>Admin UI not found</h2>", status_code=404)
+
 
 
 @app.get("/", include_in_schema=False)

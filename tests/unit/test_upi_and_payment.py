@@ -362,3 +362,79 @@ async def test_admin_simulate_bank_sms_endpoint(client):
         json={"utr": "123", "amount": 15.0},
     )
     assert bad_res.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_payment_setup_hub_endpoints(client):
+    """Verifies that the Payment Setup Hub GET and POST endpoints return and update configurations."""
+    from backend.core.config import settings
+
+    headers = {"X-Admin-Secret": settings.ADMIN_SECRET}
+
+    # 1. GET /admin/payments/setup-hub
+    res = await client.get("/admin/payments/setup-hub", headers=headers)
+    assert res.status_code == 200
+    hub_data = res.json()
+    assert "cloud_webhook" in hub_data
+    assert "counter_phone" in hub_data
+    assert "supported_merchant_apps" in hub_data
+    assert "com.phonepe.app" in hub_data["supported_merchant_apps"]
+
+    # 2. POST /admin/payments/setup-hub
+    update_res = await client.post(
+        "/admin/payments/setup-hub",
+        headers=headers,
+        json={
+            "provider": "razorpay",
+            "key_id": "rzp_test_hubkey123",
+            "key_secret": "hubsecret456",
+            "webhook_secret": "hubwebhooksec789"
+        }
+    )
+    assert update_res.status_code == 200
+    up_data = update_res.json()
+    assert up_data["status"] == "success"
+    assert up_data["updated"]["provider"] == "razorpay"
+
+
+@pytest.mark.asyncio
+async def test_cloud_webhook_and_phone_event_ingestion(client):
+    """Verifies test endpoints for cloud webhook and MacroDroid phone notification ingestion."""
+    from backend.core.config import settings
+
+    headers = {"X-Admin-Secret": settings.ADMIN_SECRET}
+
+    # 1. Test cloud webhook simulation
+    test_cloud = await client.post(
+        "/admin/payments/test-cloud-webhook",
+        headers=headers,
+        json={"amount": 35.0}
+    )
+    assert test_cloud.status_code == 200
+    assert test_cloud.json()["verified"] is True
+
+    # 2. Test MacroDroid phone event ingestion
+    phone_event_res = await client.post(
+        "/payments/phone-event",
+        json={
+            "amount": "25.00",
+            "rawNotification": {
+                "title": "Payment Received",
+                "text": "Received ₹25.00 from John. UTR: 412398129841",
+                "package": "com.phonepe.app"
+            }
+        }
+    )
+    assert phone_event_res.status_code == 200
+    event_data = phone_event_res.json()
+    assert event_data["status"] == "success"
+    assert event_data["amount"] == 25.0
+    assert event_data["utr"] == "412398129841"
+
+    # 3. Check Phone status reports online
+    status_res = await client.get("/payments/phone-status")
+    assert status_res.status_code == 200
+    status_data = status_res.json()
+    assert status_data["connected"] is True
+    assert status_data["total_events_received"] >= 1
+
